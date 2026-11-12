@@ -92,6 +92,23 @@ The secret in the path is the only thing protecting the server, so treat the URL
 The server refuses to listen on a public address without a token, and private-network addresses
 stay blocked so it cannot be used to reach into the host's network.
 
+#### Running it in a GitHub Codespace
+
+The repo includes a Codespace setup that installs the optional extras and starts the server on
+port 8765 by itself.
+
+1. Add a Codespaces secret named `OPENRESEARCH_TOKEN` (GitHub Settings, Codespaces, Secrets) with a
+   long random value, and give this repository access to it. The server refuses to start without it.
+2. On the repository page: Code, Codespaces, Create codespace on main.
+3. In the Ports tab, right-click port 8765, Port Visibility, Public. Or, in the terminal:
+   `gh codespace ports visibility 8765:public -c $CODESPACE_NAME`
+4. Your connector URL is printed by:
+   `echo https://$CODESPACE_NAME-8765.$GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN/mcp/$OPENRESEARCH_TOKEN`
+
+The server log is at `/tmp/openresearch.log`. A Codespace stops after a period of inactivity (30
+minutes by default) and uses your Codespaces hours while running; the connector works only while it
+is up. For an always-on connector, run the Dockerfile on any host instead.
+
 ### Any other MCP client
 
 ```json
