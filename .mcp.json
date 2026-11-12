@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "openresearch": {
+      "command": "python3",
+      "args": ["-m", "openresearch", "mcp"]
+    }
+  }
+}

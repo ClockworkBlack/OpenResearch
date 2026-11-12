@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openresearch"
+version = "0.1.0"
+description = "Search, read, crawl and research the web for AI agents. Standard library only, no API keys."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = []
+
+[project.optional-dependencies]
+search = ["ddgs"]
+pdf = ["pypdf"]
+render = ["playwright"]
+all = ["ddgs", "pypdf", "playwright", "brotli"]
+
+[project.scripts]
+openresearch = "openresearch.cli:main"
+
+[tool.setuptools]
+packages = ["openresearch"]
