@@ -2,14 +2,25 @@
   "name": "OpenResearch MCP server",
   "image": "mcr.microsoft.com/devcontainers/python:3.12",
   "postCreateCommand": "pip install --user ddgs pypdf",
-  "postStartCommand": "setsid nohup python -m openresearch mcp --http --host 0.0.0.0 > /tmp/openresearch.log 2>&1 &",
-  "forwardPorts": [8765],
+  "forwardPorts": [
+    8765
+  ],
   "portsAttributes": {
-    "8765": { "label": "OpenResearch MCP", "onAutoForward": "silent" }
+    "8765": {
+      "label": "OpenResearch MCP",
+      "onAutoForward": "silent"
+    }
   },
   "secrets": {
     "OPENRESEARCH_TOKEN": {
       "description": "A long random secret. Your connector URL ends in /mcp/<this secret>. The server will not start without it."
+    }
+  },
+  "customizations": {
+    "vscode": {
+      "settings": {
+        "task.allowAutomaticTasks": "on"
+      }
     }
   }
 }

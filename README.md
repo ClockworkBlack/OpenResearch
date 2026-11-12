@@ -95,7 +95,8 @@ stay blocked so it cannot be used to reach into the host's network.
 #### Running it in a GitHub Codespace
 
 The repo includes a Codespace setup that installs the optional extras and starts the server on
-port 8765 by itself.
+port 8765 in its own terminal tab when the Codespace opens. Keep that tab open; if it is missing,
+run `python -m openresearch mcp --http --host 0.0.0.0` yourself.
 
 1. Add a Codespaces secret named `OPENRESEARCH_TOKEN` (GitHub Settings, Codespaces, Secrets) with a
    long random value, and give this repository access to it. The server refuses to start without it.
@@ -105,7 +106,7 @@ port 8765 by itself.
 4. Your connector URL is printed by:
    `echo https://$CODESPACE_NAME-8765.$GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN/mcp/$OPENRESEARCH_TOKEN`
 
-The server log is at `/tmp/openresearch.log`. A Codespace stops after a period of inactivity (30
+A Codespace stops after a period of inactivity (30
 minutes by default) and uses your Codespaces hours while running; the connector works only while it
 is up. For an always-on connector, run the Dockerfile on any host instead.
 
