@@ -399,7 +399,8 @@ class TestMcp(Base):
             except urllib.error.HTTPError as e:
                 return e.code, None
         try:
-            self.assertEqual(post(url)[0], 401)
+            self.assertEqual(post(url)[0], 404)
+            self.assertEqual(post(url + "/wrong")[0], 404)
             self.assertEqual(len(post(url, {"Authorization": "Bearer s3cret"})[1]["result"]["tools"]), 6)
             self.assertEqual(post(url + "/s3cret")[0], 200)
         finally:

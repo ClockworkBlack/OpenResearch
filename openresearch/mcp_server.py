@@ -130,14 +130,15 @@ def serve_http(host: str = "127.0.0.1", port: int = 8765, token: str = "", serve
             self._send(405, b'{"error":"use POST"}')
 
         def do_DELETE(self):
-            self._send(200 if self._authorized() else 401)
+            self._send(200 if self._authorized() else 404)
 
         def do_POST(self):
             path = self.path.split("?")[0].rstrip("/")
             if not (path == "/mcp" or path.startswith("/mcp/")):
-                return self._send(404, b'{"error":"not found"}')
+                return self._send(404, b'{"error":"not found: the connector URL must end in /mcp/<your OPENRESEARCH_TOKEN>"}')
             if not self._authorized():
-                return self._send(401, b'{"error":"unauthorized"}')
+                # 404, not 401: a 401 makes MCP clients start an OAuth sign-in this server does not offer.
+                return self._send(404, b'{"error":"not found: the connector URL must end in /mcp/<your OPENRESEARCH_TOKEN>"}')
             try:
                 length = int(self.headers.get("Content-Length") or 0)
                 if length > 4_000_000:
