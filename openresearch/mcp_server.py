@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hmac
 import json
+import socket
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -155,4 +156,18 @@ def serve_http(host: str = "127.0.0.1", port: int = 8765, token: str = "", serve
                 return self._send(202)
             self._send(200, json.dumps(resp, ensure_ascii=False).encode("utf-8"))
 
+    if host in ("0.0.0.0", "::", "") and socket.has_ipv6:
+        class DualStack(ThreadingHTTPServer):
+            address_family = socket.AF_INET6
+
+            def server_bind(self):
+                try:
+                    self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+                except (OSError, AttributeError):
+                    pass
+                super().server_bind()
+        try:
+            return DualStack(("::", port), Handler)   # IPv6 and IPv4: port forwarders may use either
+        except OSError:
+            pass
     return ThreadingHTTPServer((host, port), Handler)
