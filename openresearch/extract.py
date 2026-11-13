@@ -19,6 +19,73 @@ _NEG = re.compile(
     r"visually-hidden|screen-reader-text|navbox|mw-editsection|toc|noprint|paywall)(?:$|[\s_-])",
     re.I)
 _HIDDEN_STYLE = re.compile(r"display\s*:\s*none|visibility\s*:\s*hidden", re.I)
+# Utility classes that contain "hidden" but leave content visible (overflow-hidden clips, it doesn't hide).
+_NOT_HIDING = re.compile(r"^(?:overflow|text|truncate)(?:-[xy])?-hidden$|^[\w-]+:[\w-]*hidden$", re.I)
+# A responsive "display" class next to a plain `hidden` means visible at some screen width (Tailwind etc.).
+_SHOWN_AT = re.compile(r"^[\w-]+:(?:block|flex|grid|inline|inline-block|inline-flex|inline-grid|table|contents)$")
+
+
+def _signature(n: Node) -> str:
+    """id + class for the boilerplate check, minus classes that only look like hiding."""
+    classes = [c for c in n.get("class").split() if not _NOT_HIDING.match(c)]
+    if any(_SHOWN_AT.match(c) for c in classes):
+        classes = [c for c in classes if c.lower() != "hidden"]
+    return (n.get("id") + " " + " ".join(classes)).strip()
+
+
+# React streaming SSR: content arrives in <div hidden id="S:n"> segments that a script moves into
+# <template id="P:n"> placeholders and <!--$?--><template id="B:n">fallback<!--/$--> boundaries.
+_SEGMENT = re.compile(r'<div hidden(?:="")? id="S:(\d+)">', re.I)
+_DIV_TAG = re.compile(r"<div\b|</div\s*>", re.I)
+_BOUNDARY_SWAP = re.compile(r'\$RC\(\s*"B:(\d+)"\s*,\s*"S:(\d+)"\s*\)')
+_SUSPENSE_MARK = re.compile(r"<!--\$[?!]?-->|<!--/\$-->")
+
+
+def _inline_react_segments(html: str) -> str:
+    """Do what React's inline scripts would: put streamed segments where they belong."""
+    if "hidden" not in html or not _SEGMENT.search(html):
+        return html
+    segments, spans = {}, []
+    for m in _SEGMENT.finditer(html):
+        depth, end = 0, None
+        for t in _DIV_TAG.finditer(html, m.start()):
+            depth += -1 if t.group().startswith("</") else 1
+            if depth == 0:
+                end = t
+                break
+        if end is None:
+            continue
+        segments[m.group(1)] = html[m.end():end.start()]
+        spans.append((m.start(), end.end()))
+    if not segments:
+        return html
+    boundaries = {b: s for b, s in _BOUNDARY_SWAP.findall(html) if s in segments}
+    for a, b in reversed(spans):                       # drop the hidden copies; they get inlined below
+        html = html[:a] + html[b:]
+
+    def fill(text: str, seen: frozenset) -> str:
+        def placeholder(m):
+            n = m.group(1)
+            return fill(segments[n], seen | {n}) if n in segments and n not in seen else ""
+        text = re.sub(r'<template id="P:(\d+)"></template>', placeholder, text)
+        out, pos = [], 0
+        for m in re.finditer(r'<!--\$\?--><template id="B:(\d+)"></template>', text):
+            seg = boundaries.get(m.group(1))
+            if seg is None or seg in seen:
+                continue
+            depth, close = 1, None                       # skip the fallback up to the matching <!--/$-->
+            for t in _SUSPENSE_MARK.finditer(text, m.end()):
+                depth += -1 if t.group() == "<!--/$-->" else 1
+                if depth == 0:
+                    close = t
+                    break
+            if close is None or m.start() < pos:
+                continue
+            out += [text[pos:m.start()], fill(segments[seg], seen | {seg})]
+            pos = close.end()
+        return "".join(out) + text[pos:]
+
+    return fill(html, frozenset())
 _SEMANTIC = ("article, main, [role=main], [itemprop=articleBody], #content, #main-content, "
              "#main, .post-content, .entry-content, .article-body, .article-content, "
              "#mw-content-text, .markdown-body, .content")
@@ -73,7 +140,7 @@ def _strip(root: Node, main_only: bool):
         elif n.get("style") and _HIDDEN_STYLE.search(n.get("style")):
             drop = True
         else:
-            sig = (n.get("id") + " " + n.get("class")).strip()
+            sig = _signature(n)
             if sig and _NEG.search(sig) and lens[id(n)] < 0.4 * total:
                 drop = True
         if drop:
@@ -213,7 +280,7 @@ def links(root: Node, base_url: str) -> list:
 def extract_html(html: str, url: str = "", mode: str = "main", link_style: str = "inline",
                  images: bool = False) -> dict:
     """HTML -> {markdown, title, ..., links}. mode: 'main' (article only) or 'full' (whole page)."""
-    root = parse(html)
+    root = parse(_inline_react_segments(html))
     meta = _meta(root)
     all_links = links(root, url)
     body = root.find("body") or root

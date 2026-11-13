@@ -100,6 +100,36 @@ class TestExtract(unittest.TestCase):
         self.assertNotIn("Footer junk", md)
 
 
+    def test_utility_hidden_classes_kept(self):
+        body = "Release notes: added a feature, fixed a bug, and improved startup time for large projects. "
+        html = ("<html><body><div class='wrap'>"
+                + "".join(f"<div class='update'><span>Day {i}</span><div class='flex-1 overflow-hidden'>"
+                          f"<p>{body}Item {i}.</p></div></div>" for i in range(6))
+                + "<div class='hidden md:block'><p>Shown on wide screens, with plenty of words here.</p></div>"
+                + "<div class='hidden'><p>Really hidden text that never shows.</p></div></div></body></html>")
+        md = extract_html(html)["markdown"]
+        self.assertIn("Item 0.", md)
+        self.assertIn("Item 5.", md)
+        self.assertIn("Shown on wide screens", md)
+        self.assertNotIn("Really hidden", md)
+
+    def test_react_streamed_segments(self):
+        html = ('<html><head><title>Streamed</title></head><body><main><h1>Streamed article</h1>'
+                '<!--$?--><template id="B:0"></template><div role="status"><span>Loading</span></div><!--/$-->'
+                '</main><div hidden id="S:0"><div class="intro"><p>Intro paragraph that the server streamed '
+                'in later, with enough words to count as real content.</p></div><template id="P:1"></template>'
+                '</div><script>$RC("B:0","S:0")</script><div hidden id="S:1"><div class="article-body"><p>Body '
+                'paragraph from a nested segment, also long enough to be kept as content.</p></div></div>'
+                '</body></html>')
+        md = extract_html(html, "https://x.example/a")["markdown"]
+        self.assertIn("Intro paragraph", md)
+        self.assertIn("Body paragraph from a nested segment", md)
+        self.assertNotIn("Loading", md)
+        self.assertEqual(md.count("Intro paragraph"), 1)
+        full = extract_html(html, "https://x.example/a", mode="full")["markdown"]
+        self.assertEqual(full.count("Body paragraph"), 1)
+
+
 class TestRank(unittest.TestCase):
     def test_focus_returns_relevant_passage_only(self):
         md = extract_html(ARTICLE, "http://news.example/article")["markdown"] + "\n\n" + "\n\n".join(
@@ -283,6 +313,10 @@ class TestSearch(Base):
         self.assertEqual((lite[0].title, lite[0].url, lite[0].snippet), ("Lite one", "https://lite.example/", "Lite snippet"))
         m = S.parse_mojeek(MOJEEK)
         self.assertEqual((m[0].title, m[0].url, m[0].snippet), ("Mojeek title", "https://m.example/a", "Mojeek snippet"))
+
+    def test_mojeek_is_opt_in(self):
+        self.assertNotIn("mojeek", S.engines_for(self.f, "web"))
+        self.assertEqual(S.engines_for(self.f, "web", ["mojeek"]), ["mojeek"])
 
     def _fake_engines(self):
         base = self.base

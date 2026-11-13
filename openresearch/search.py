@@ -141,8 +141,11 @@ def parse_mojeek(html: str) -> list:
 
 
 def mojeek(f, q, n, o):
+    """Opt-in only (engines=["mojeek"]): Mojeek refuses many automated clients with HTTP 403."""
     r = f.fetch("https://www.mojeek.com/search?" + urlencode({"q": q}), robots=False, max_age=_SEARCH_TTL)
     if not r.ok:
+        if r.status == 403:
+            raise RuntimeError("HTTP 403: Mojeek refused this client")
         raise RuntimeError(r.error)
     return parse_mojeek(r.text)[:n]
 
@@ -282,7 +285,7 @@ ENGINES = {"ddg": ddg, "mojeek": mojeek, "wikipedia": wikipedia, "brave": brave,
            "github": github, "stackexchange": stackexchange}
 WEIGHT = {"wikipedia": 0.5, "mojeek": 0.7}
 VERTICALS = {
-    "web": ["ddg", "mojeek", "wikipedia"],
+    "web": ["ddg", "wikipedia"],            # mojeek is opt-in: it 403s automated clients
     "news": ["ddg", "hackernews"],
     "papers": ["openalex", "arxiv", "crossref"],
     "code": ["github", "stackexchange", "ddg"],
