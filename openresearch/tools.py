@@ -107,13 +107,16 @@ TOOLS = [
     {
         "name": "map",
         "description": (
-            "List a site's URLs fast (sitemaps plus links on the start page) without reading the pages. With "
+            "List a site's URLs fast (sitemaps, plus links on a few pages when there is no sitemap) without "
+            "reading the pages. With "
             "`search`, URLs are ordered by relevance. Use it to find the right page before `fetch`."),
         "inputSchema": {"type": "object", "required": ["url"], "properties": {
             "url": _s("Any URL on the site."),
             "search": _s("Order URLs by relevance to these words."),
             "limit": _i("Maximum URLs to return.", 100),
             "subdomains": {"type": "boolean", "description": "Include subdomains.", "default": False},
+            "explore": _i("When the sitemap is missing or thin, open up to this many pages to find more links "
+                          "(0 = start page only).", 12, minimum=0, maximum=50),
         }},
     },
     {
@@ -174,7 +177,8 @@ def call(f: Fetcher, name: str, a: dict) -> str:
                       use_sitemap=bool(a.get("use_sitemap")))
         return format_crawl(pages, int(a.get("max_tokens", 12000)))
     if name == "map":
-        items = map_site(f, a["url"], int(a.get("limit", 100)), a.get("search", ""), bool(a.get("subdomains")))
+        items = map_site(f, a["url"], int(a.get("limit", 100)), a.get("search", ""), bool(a.get("subdomains")),
+                         explore=min(int(a.get("explore", 12)), 50))
         if not items:
             return "No URLs found (the site may block crawlers or have no sitemap)."
         return f"{len(items)} URLs\n" + "\n".join(

@@ -139,6 +139,9 @@ def ddg(f: Fetcher, q: str, n: int, o: dict) -> list:
         r2 = f.fetch("https://lite.duckduckgo.com/lite/?" + urlencode(params), robots=False, max_age=_SEARCH_TTL)
         out = parse_ddg_lite(r2.text) if r2.ok else []
         if not out and not r.ok and not r2.ok:
+            if 202 in (r.status, r2.status):
+                raise RuntimeError("DuckDuckGo is throttling this network (HTTP 202); `pip install ddgs` adds "
+                                   "more backends, or configure Brave or SearXNG")
             raise RuntimeError(r.error or r2.error or "no results")
     return out[:n]
 
@@ -178,18 +181,23 @@ def wikipedia(f, q, n, o):
 def brave(f, q, n, o):
     if not f.cfg.brave_api_key:
         raise RuntimeError("no BRAVE_API_KEY set")
-    data = _json(f, "https://api.search.brave.com/res/v1/web/search?" + urlencode({"q": q, "count": min(n, 20)}),
+    params = {"q": q, "count": min(n, 20)}
+    if _TIME.get(o.get("time")):
+        params["freshness"] = "p" + _TIME[o["time"]]                     # pd, pw, pm, py
+    data = _json(f, "https://api.search.brave.com/res/v1/web/search?" + urlencode(params),
                  headers={"X-Subscription-Token": f.cfg.brave_api_key, "Accept": "application/json"},
-                      max_age=_SEARCH_TTL)
+                 max_age=_SEARCH_TTL)
     return [Result(_clean(r.get("title")), r.get("url", ""), _clean(r.get("description")), "brave",
-                   r.get("page_age", "")[:10]) for r in (data.get("web") or {}).get("results", [])]
+                   (r.get("page_age") or "")[:10]) for r in (data.get("web") or {}).get("results", [])]
 
 
 def searxng(f, q, n, o):
     if not f.cfg.searxng_url:
         raise RuntimeError("no searxng_url configured")
-    data = _json(f, f.cfg.searxng_url.rstrip("/") + "/search?" + urlencode({"q": q, "format": "json"}),
-                 max_age=_SEARCH_TTL)
+    params = {"q": q, "format": "json"}
+    if o.get("time") in ("day", "week", "month", "year"):
+        params["time_range"] = o["time"]
+    data = _json(f, f.cfg.searxng_url.rstrip("/") + "/search?" + urlencode(params), max_age=_SEARCH_TTL)
     return [Result(r.get("title", ""), r.get("url", ""), r.get("content", ""), "searxng",
                    (r.get("publishedDate") or "")[:10]) for r in data.get("results", [])[:n]]
 

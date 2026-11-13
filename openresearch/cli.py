@@ -41,6 +41,10 @@ def _doctor(f: Fetcher) -> int:
             state = f"skipped ({e})" if skip else f"FAILED ({e})"
             bad += not skip
         print(f"  engine {name:<14} {state}  [{time.time() - t:.1f}s]")
+    has_ddgs = any(__import__("importlib").util.find_spec(m) for m in ("ddgs", "duckduckgo_search"))
+    if not (has_ddgs or f.cfg.brave_api_key or f.cfg.searxng_url):
+        print("  hint: web search leans on DuckDuckGo alone. `pip install ddgs`, or set BRAVE_API_KEY or\n"
+              "        OPENRESEARCH_SEARXNG_URL, for backups when it throttles you (README: Search backends)")
     p = read(f, "https://example.com", max_age=0)
     print(f"  fetch  example.com    {'ok' if p.ok else 'FAILED (' + p.error + ')'}")
     return 1 if bad or not p.ok else 0
@@ -95,6 +99,7 @@ def main(argv=None) -> int:
     p.add_argument("--search", default="")
     p.add_argument("--limit", type=int, default=100)
     p.add_argument("--subdomains", action="store_true")
+    p.add_argument("--explore", type=int, default=12, help="pages to open for links when there is no sitemap")
 
     p = sub.add_parser("extract", help="structured data as JSON")
     p.add_argument("url")
@@ -197,6 +202,8 @@ def _run(a, f) -> int:
                 args["queries"] = args.pop("query")
             if "url" in args:
                 args["urls"] = args.pop("url")
+        if a.cmd == "map":
+            args["explore"] = a.explore                  # 0 is meaningful here, so keep it
         if a.cmd == "crawl" and args.pop("sitemap", None):
             args["use_sitemap"] = True
         if a.cmd == "extract":

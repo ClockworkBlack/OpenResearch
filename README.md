@@ -151,6 +151,46 @@ Environment variables (or the same keys, lower-case, in `~/.config/openresearch/
 | `OPENRESEARCH_RENDER` | `auto` | `auto`, `never` or `always` for JavaScript rendering |
 | `OPENRESEARCH_USER_AGENT` | identifies as OpenResearch | Request User-Agent |
 
+## Search backends
+
+Out of the box, web search uses DuckDuckGo plus Wikipedia, with no keys. DuckDuckGo throttles busy
+IP addresses (cloud machines and CI especially), so add at least one backup. Every option below is
+picked up automatically and fused with the others; `python -m openresearch doctor` shows which work.
+
+**1. `ddgs` (no key, recommended first step).** Puts several search backends behind the `ddg` engine.
+
+```bash
+pip install ddgs
+```
+
+**2. Brave Search API (key, free tier).** Sign up at <https://brave.com/search/api/>, create a
+subscription, copy the key from the dashboard's *API keys* page, then:
+
+```bash
+export BRAVE_API_KEY=your-key-here
+```
+
+**3. SearXNG (your own server, no key).** Point OpenResearch at an instance you run; it needs the
+JSON format turned on (`search: formats: [html, json]` in its `settings.yml`).
+
+```bash
+docker run -d -p 8888:8080 --name searxng searxng/searxng
+export OPENRESEARCH_SEARXNG_URL=http://localhost:8888
+export OPENRESEARCH_ALLOW_PRIVATE=1      # only because this instance is on localhost
+```
+
+To keep settings without environment variables, put the same names, lower-case and without the
+`OPENRESEARCH_` prefix, in `~/.config/openresearch/config.json`:
+
+```json
+{"brave_api_key": "your-key-here", "searxng_url": "https://searx.example.org"}
+```
+
+**In a Claude Code cloud session**, keep keys out of the repository and out of chat: save the Brave key
+as a network secret for `api.search.brave.com` on the session's environment (header
+`X-Subscription-Token`), and set `BRAVE_API_KEY` to any placeholder so the engine switches on; the
+proxy puts the real key on each request.
+
 ## How it behaves
 
 - **Polite by default.** Honest User-Agent, `robots.txt` and `Crawl-delay` respected, per-host

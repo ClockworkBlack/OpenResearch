@@ -5,6 +5,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -296,6 +297,13 @@ class TestCrawl(Base):
         self.assertIn(self.base + "/article", urls)
         self.assertEqual(next(i for i in items if i["url"].endswith("/article"))["lastmod"], "2026-01-01")
         self.assertFalse(any("elsewhere" in u or u.endswith(".png") for u in urls))
+
+    def test_map_explores_when_start_page_lacks_the_answer(self):
+        with mock.patch("openresearch.crawl.sitemap_urls", return_value=[]):
+            urls = [i["url"] for i in map_site(self.f, self.base + "/nomap/", search="html parser")]
+            self.assertEqual(urls[0], self.base + "/nomap/library/html.parser")    # found one level down
+            only_start = [i["url"] for i in map_site(self.f, self.base + "/nomap/", search="html parser", explore=0)]
+        self.assertNotIn(self.base + "/nomap/library/html.parser", only_start)
 
     def test_crawl_scope_and_robots(self):
         pages = crawl(self.f, self.base + "/docs/a", max_pages=20, delay=0)
