@@ -22,7 +22,7 @@ python -m openresearch mcp            # MCP server over stdio
 | Tokens returned | Only the passages that match your question (`query`), with a budget and paging | Whole page |
 | Research in one call | `research`: multi-query search, parallel reads, ranked passages under numbered, dated sources | Separate search and scrape calls, or a paid agent |
 | Search | Several engines fused, duplicates merged, per-engine failures reported | One index |
-| Dead or blocked pages | Falls back to the Internet Archive and says so | Varies |
+| Dead or blocked pages | Says why (browser check, rate limit, login), tries the Internet Archive once, and says so | Varies |
 | Structured data | Deterministic: CSS selectors, tables as records, JSON-LD, embedded app state | LLM extraction (flexible, but can invent values) |
 | Caching | Local SQLite with ETag revalidation | Vendor-side |
 
@@ -35,9 +35,9 @@ anything by description" is also not built in; the calling model does that from 
 
 | Tool | What it does |
 | --- | --- |
-| `research` | Runs your queries across engines, reads the best pages in parallel, returns the most relevant passages grouped under numbered sources (title, domain, date, URL), then lists gaps: question terms nothing covered, pages that failed, and unread leads. |
-| `search` | Multi-engine search with reciprocal-rank fusion. Verticals: `web`, `news`, `papers` (OpenAlex, arXiv, Crossref), `code` (GitHub, Stack Overflow), `discussions` (Hacker News). Filters: `site`, `include_domains`, `exclude_domains`, `time`. |
-| `fetch` | One or many URLs to clean Markdown: HTML, PDF, JSON, RSS/Atom, sitemaps, plain text. Pass `query` to get only the relevant passages. `offset` pages through long documents. |
+| `research` | Runs your queries across engines, reads the best pages in parallel, returns the most relevant passages grouped under numbered sources (title, domain, date, URL), then lists gaps: question terms nothing covered, pages that failed (with why, and their search snippet), and unread leads. A page that cannot be read gives its slot to the next result. |
+| `search` | Multi-engine search with reciprocal-rank fusion. Verticals: `web`, `news` (Bing News feed, DuckDuckGo, Hacker News), `papers` (OpenAlex, arXiv, Crossref), `code` (GitHub, Stack Overflow), `discussions` (Hacker News). Filters: `site`, `include_domains`, `exclude_domains`, `time`. |
+| `fetch` | One or many URLs to clean Markdown: HTML, PDF, JSON, RSS/Atom, sitemaps, plain text. Pass `query` to get only the relevant passages. `offset` pages through long documents; `render` loads the page in a headless browser first. |
 | `crawl` | Crawls a site within its domain. With `query` it is best-first: the links most related to your question are followed first and each page is trimmed to what matters. Glob `include` / `exclude`, depth and page limits, optional sitemap seeding. |
 | `map` | Lists a site's URLs from sitemaps and the start page without reading them; `search` orders them by relevance. |
 | `extract` | Structured JSON: your CSS selectors (`css::text`, `css::attr(href)`, nested `fields`), tables as rows and records, JSON-LD, metadata, links, and `__NEXT_DATA__`-style embedded state. |
@@ -138,9 +138,10 @@ Environment variables (or the same keys, lower-case, in `~/.config/openresearch/
 | --- | --- | --- |
 | `OPENRESEARCH_EXCLUDE_DOMAINS` | | Comma list never returned by search or research |
 | `OPENRESEARCH_PREFER_DOMAINS` | | Comma list ranked higher |
-| `OPENRESEARCH_ENGINES` | `ddg,mojeek,wikipedia` | Web engines to use |
+| `OPENRESEARCH_ENGINES` | `ddg,wikipedia` | Web engines to use (`mojeek` is opt-in: it refuses many automated clients) |
 | `OPENRESEARCH_SEARXNG_URL` | | Add your own SearXNG instance as an engine |
 | `BRAVE_API_KEY` | | Add Brave Search as an engine |
+| `OPENRESEARCH_OPENALEX_API_KEY` | | Your own OpenAlex key for paper search (keyless requests share a small daily budget per IP address) |
 | `OPENRESEARCH_CACHE_TTL` | `3600` | Seconds a cached page stays fresh |
 | `OPENRESEARCH_CACHE_DIR` | `~/.cache/openresearch` | Cache location |
 | `OPENRESEARCH_RESPECT_ROBOTS` | `1` | Obey `robots.txt` |
@@ -149,6 +150,46 @@ Environment variables (or the same keys, lower-case, in `~/.config/openresearch/
 | `OPENRESEARCH_WAYBACK_FALLBACK` | `1` | Use the Internet Archive when a page is blocked or gone |
 | `OPENRESEARCH_RENDER` | `auto` | `auto`, `never` or `always` for JavaScript rendering |
 | `OPENRESEARCH_USER_AGENT` | identifies as OpenResearch | Request User-Agent |
+
+## Search backends
+
+Out of the box, web search uses DuckDuckGo plus Wikipedia, with no keys. DuckDuckGo throttles busy
+IP addresses (cloud machines and CI especially), so add at least one backup. Every option below is
+picked up automatically and fused with the others; `python -m openresearch doctor` shows which work.
+
+**1. `ddgs` (no key, recommended first step).** Puts several search backends behind the `ddg` engine.
+
+```bash
+pip install ddgs
+```
+
+**2. Brave Search API (key, free tier).** Sign up at <https://brave.com/search/api/>, create a
+subscription, copy the key from the dashboard's *API keys* page, then:
+
+```bash
+export BRAVE_API_KEY=your-key-here
+```
+
+**3. SearXNG (your own server, no key).** Point OpenResearch at an instance you run; it needs the
+JSON format turned on (`search: formats: [html, json]` in its `settings.yml`).
+
+```bash
+docker run -d -p 8888:8080 --name searxng searxng/searxng
+export OPENRESEARCH_SEARXNG_URL=http://localhost:8888
+export OPENRESEARCH_ALLOW_PRIVATE=1      # only because this instance is on localhost
+```
+
+To keep settings without environment variables, put the same names, lower-case and without the
+`OPENRESEARCH_` prefix, in `~/.config/openresearch/config.json`:
+
+```json
+{"brave_api_key": "your-key-here", "searxng_url": "https://searx.example.org"}
+```
+
+**In a Claude Code cloud session**, keep keys out of the repository and out of chat: save the Brave key
+as a network secret for `api.search.brave.com` on the session's environment (header
+`X-Subscription-Token`), and set `BRAVE_API_KEY` to any placeholder so the engine switches on; the
+proxy puts the real key on each request.
 
 ## How it behaves
 

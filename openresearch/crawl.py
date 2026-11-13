@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlsplit
 
 from .fetch import Fetcher, normalize_url
-from .page import Page, domain_of, read
+from .page import Page, domain_of, read, read_many
 from .rank import tokens
 
 _SKIP_EXT = re.compile(
@@ -30,16 +30,36 @@ def _match(url: str, patterns) -> bool:
     return any(fnmatch.fnmatch(url if "://" in p else path, p) for p in patterns)
 
 
+_PAGE_EXT = re.compile(r"\.(?:s?html?|php\d?|aspx?|jsp|cgi)$", re.I)
+
+
+def _url_words(url: str, anchor: str) -> set:
+    path = _PAGE_EXT.sub("", urlsplit(url).path)      # "getopt.html" is not about HTML
+    return set(tokens(re.sub(r"[/_\-.]+", " ", path) + " " + anchor))
+
+
 def _relevance(query_tokens: set, url: str, anchor: str) -> float:
+    """Share of the query's words found in the URL path and link text, plus a small bonus for links that
+    are about little else (so 'html.parser' beats a long page title that mentions both words)."""
     if not query_tokens:
         return 0.0
-    have = set(tokens(re.sub(r"[/_\-.]+", " ", urlsplit(url).path) + " " + anchor))
-    return len(query_tokens & have) / len(query_tokens)
+    have = _url_words(url, anchor)
+    hits = len(query_tokens & have)
+    return hits / len(query_tokens) + (0.1 * hits / len(have) if have else 0.0)
+
+
+# Words in a link that suggest a page listing many others: worth opening when nothing matches the search.
+_HUB = frozenset(tokens("index contents reference library docs documentation sitemap archive archives all "
+                        "topics modules api guide guides manual tutorial categories browse directory"))
+
+
+def _hub(url: str, anchor: str) -> float:
+    return 0.3 if _url_words(url, anchor) & _HUB else 0.0
 
 
 def sitemap_urls(f: Fetcher, origin: str, limit: int = 5000) -> list:
     """(url, lastmod) pairs from robots.txt sitemaps and /sitemap.xml, following sitemap indexes."""
-    queue = list(f.sitemaps(origin)) or [origin + "/sitemap.xml"]
+    queue = list(f.sitemaps(origin)) or [origin + p for p in ("/sitemap.xml", "/sitemap_index.xml", "/sitemap-index.xml")]
     seen, out = set(), []
     while queue and len(out) < limit and len(seen) < 60:
         sm = queue.pop(0)
@@ -73,25 +93,52 @@ def sitemap_urls(f: Fetcher, origin: str, limit: int = 5000) -> list:
     return out
 
 
-def map_site(f: Fetcher, url: str, limit: int = 200, search: str = "", subdomains: bool = False) -> list:
-    """Discover a site's URLs quickly (sitemaps + links on the start page) without reading pages.
+def map_site(f: Fetcher, url: str, limit: int = 200, search: str = "", subdomains: bool = False,
+             explore: int = 12) -> list:
+    """Discover a site's URLs quickly without reading their content: sitemaps, links on the start
+    page, and, when the sitemap is missing or thin (or nothing matches `search` yet), links on up to
+    `explore` more pages, opened most-promising first.
     With `search`, URLs are ordered by how well their path and link text match it.
     Returns dicts: {url, lastmod, text}."""
     url = normalize_url(url)
     s = urlsplit(url)
     origin, root = f"{s.scheme}://{s.netloc}", domain_of(url)
+    q = set(tokens(search))
     found = {}
     for loc, lastmod in sitemap_urls(f, origin):
         if _same_site(loc, root, subdomains):
-            found.setdefault(loc, {"url": loc, "lastmod": lastmod, "text": ""})
-    page = read(f, url, max_tokens=200, mode="full", render="never", fallback=False)
-    for link, text in page.links:
-        if _same_site(link, root, subdomains) and not _SKIP_EXT.search(link):
-            found.setdefault(link, {"url": link, "lastmod": "", "text": text})["text"] = text
+            found.setdefault(loc.rstrip("/"), {"url": loc, "lastmod": lastmod, "text": ""})
+    from_sitemap = len(found)
+
+    def add(page):
+        for link, text in page.links:
+            if _same_site(link, root, subdomains) and not _SKIP_EXT.search(link):
+                it = found.setdefault(link.rstrip("/"), {"url": link, "lastmod": "", "text": text})
+                if text and len(text) > len(it["text"]):
+                    it["text"] = text
+
+    def score(it):
+        return _relevance(q, it["url"], it["text"]) if q else 0.0
+
+    opened = {url}
+    add(read(f, url, max_tokens=50, mode="full", render="never", fallback=False))
+    while explore > 0 and len(opened) <= explore:
+        exact = sum(1 for it in found.values() if score(it) >= 1.0)  # every query word present
+        if (from_sitemap >= 50 and (not q or exact)) or (q and exact >= min(limit, 10)):
+            break                              # the sitemap covers the site, or enough clear matches
+        todo = sorted((it for it in found.values() if it["url"] not in opened),
+                      key=lambda it: (-(score(it) + _hub(it["url"], it["text"])),
+                                      urlsplit(it["url"]).path.count("/")))
+        batch = [it["url"] for it in todo[:min(4, explore + 1 - len(opened))]]
+        if not batch:
+            break
+        opened.update(batch)
+        for page in read_many(f, batch, workers=4, max_tokens=50, mode="full", render="never", fallback=False,
+                              retries=0, timeout=10):
+            add(page)
     items = list(found.values())
-    if search:
-        q = set(tokens(search))
-        items.sort(key=lambda it: -_relevance(q, it["url"], it["text"]))
+    if q:
+        items.sort(key=lambda it: (-score(it), urlsplit(it["url"]).path.count("/"), len(it["url"])))
     return items[:limit]
 
 

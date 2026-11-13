@@ -87,7 +87,7 @@ def extract(html: str, url: str = "", selectors: dict | None = None,
     if selectors:
         out["data"] = {name: _apply(root, spec, url) for name, spec in selectors.items()}
     if "meta" in want:
-        out["meta"] = {k: v for k, v in _meta(root).items() if v}
+        out["meta"] = {k: v for k, v in _meta(root, url).items() if v}
     if "jsonld" in want:
         ld = jsonld(root)
         if ld:
