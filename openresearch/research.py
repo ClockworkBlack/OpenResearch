@@ -96,7 +96,7 @@ def research(f: Fetcher, question: str, *, queries=None, depth: str = "standard"
             break
         if sum(1 for p in pages if p.ok) >= len(picks):
             break
-    read_urls = {canonical(p.url) for p in pages}
+    read_urls = {canonical(u) for p in pages for u in (p.url, p.final_url) if u}
     unread = [r for r in ranked if canonical(r.url) not in read_urls]
     good = [p for p in pages if p.ok]
     failed = [p for p in pages if not p.ok]

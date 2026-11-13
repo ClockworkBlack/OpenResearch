@@ -317,6 +317,15 @@ class TestCrawl(Base):
 
 
 class TestStructured(unittest.TestCase):
+    def test_table_spans(self):
+        html = ("<table><tr><th rowspan='2'>Name</th><th colspan='2'>Height</th><th rowspan='2'>City</th></tr>"
+                "<tr><th>m</th><th>ft</th></tr>"
+                "<tr><td>Alpha</td><td>828</td><td>2,717</td><td rowspan='2'>Dubai</td></tr>"
+                "<tr><td>Beta</td><td>400</td><td>1,312</td></tr></table>")
+        t = import_module("openresearch.structured").extract(html, want=("tables",))["tables"][0]
+        self.assertEqual(t["header"], ["Name", "Height m", "Height ft", "City"])
+        self.assertEqual(t["records"][1], {"Name": "Beta", "Height m": "400", "Height ft": "1,312", "City": "Dubai"})
+
     def test_extract(self):
         d = extract(ARTICLE, "http://news.example/article", {
             "headline": "article h1", "first_link": "article a::attr(href)",
@@ -355,6 +364,23 @@ class TestSearch(Base):
         self.assertEqual((lite[0].title, lite[0].url, lite[0].snippet), ("Lite one", "https://lite.example/", "Lite snippet"))
         m = S.parse_mojeek(MOJEEK)
         self.assertEqual((m[0].title, m[0].url, m[0].snippet), ("Mojeek title", "https://m.example/a", "Mojeek snippet"))
+
+    def test_bing_news_feed(self):
+        feed = (b'<rss version="2.0" xmlns:News="https://www.bing.com/news/search"><channel>'
+                b'<item><title>Widget sales &amp; profits rise</title><link>http://www.bing.com/news/apiclick.aspx?'
+                b'ref=FexRss&amp;url=https%3a%2f%2fnews.example%2fwidgets%3fa%3d1&amp;c=1</link>'
+                b'<description>Sales rose.</description><pubDate>Thu, 12 Nov 2026 12:17:00 GMT</pubDate>'
+                b'<News:Source>Example News</News:Source></item>'
+                b'<item><title>Old story</title><link>https://old.example/x</link>'
+                b'<pubDate>Mon, 01 Jan 2001 00:00:00 GMT</pubDate></item></channel></rss>')
+        rows = S.parse_bingnews(feed)
+        self.assertEqual((rows[0].title, rows[0].url, rows[0].date, rows[0].extra),
+                         ("Widget sales & profits rise", "https://news.example/widgets?a=1", "2026-11-12", "Example News"))
+        self.assertEqual(len(rows), 2)
+        self.assertNotIn("Old story", [r.title for r in S.parse_bingnews(feed, days=7)])
+        with self.assertRaises(RuntimeError):
+            S.parse_bingnews(b"<html>not a feed")
+        self.assertEqual(S.engines_for(self.f, "news")[0], "bingnews")
 
     def test_mojeek_is_opt_in(self):
         self.assertNotIn("mojeek", S.engines_for(self.f, "web"))

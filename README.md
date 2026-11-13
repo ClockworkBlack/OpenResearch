@@ -22,7 +22,7 @@ python -m openresearch mcp            # MCP server over stdio
 | Tokens returned | Only the passages that match your question (`query`), with a budget and paging | Whole page |
 | Research in one call | `research`: multi-query search, parallel reads, ranked passages under numbered, dated sources | Separate search and scrape calls, or a paid agent |
 | Search | Several engines fused, duplicates merged, per-engine failures reported | One index |
-| Dead or blocked pages | Falls back to the Internet Archive and says so | Varies |
+| Dead or blocked pages | Says why (browser check, rate limit, login), tries the Internet Archive once, and says so | Varies |
 | Structured data | Deterministic: CSS selectors, tables as records, JSON-LD, embedded app state | LLM extraction (flexible, but can invent values) |
 | Caching | Local SQLite with ETag revalidation | Vendor-side |
 
@@ -35,9 +35,9 @@ anything by description" is also not built in; the calling model does that from 
 
 | Tool | What it does |
 | --- | --- |
-| `research` | Runs your queries across engines, reads the best pages in parallel, returns the most relevant passages grouped under numbered sources (title, domain, date, URL), then lists gaps: question terms nothing covered, pages that failed, and unread leads. |
-| `search` | Multi-engine search with reciprocal-rank fusion. Verticals: `web`, `news`, `papers` (OpenAlex, arXiv, Crossref), `code` (GitHub, Stack Overflow), `discussions` (Hacker News). Filters: `site`, `include_domains`, `exclude_domains`, `time`. |
-| `fetch` | One or many URLs to clean Markdown: HTML, PDF, JSON, RSS/Atom, sitemaps, plain text. Pass `query` to get only the relevant passages. `offset` pages through long documents. |
+| `research` | Runs your queries across engines, reads the best pages in parallel, returns the most relevant passages grouped under numbered sources (title, domain, date, URL), then lists gaps: question terms nothing covered, pages that failed (with why, and their search snippet), and unread leads. A page that cannot be read gives its slot to the next result. |
+| `search` | Multi-engine search with reciprocal-rank fusion. Verticals: `web`, `news` (Bing News feed, DuckDuckGo, Hacker News), `papers` (OpenAlex, arXiv, Crossref), `code` (GitHub, Stack Overflow), `discussions` (Hacker News). Filters: `site`, `include_domains`, `exclude_domains`, `time`. |
+| `fetch` | One or many URLs to clean Markdown: HTML, PDF, JSON, RSS/Atom, sitemaps, plain text. Pass `query` to get only the relevant passages. `offset` pages through long documents; `render` loads the page in a headless browser first. |
 | `crawl` | Crawls a site within its domain. With `query` it is best-first: the links most related to your question are followed first and each page is trimmed to what matters. Glob `include` / `exclude`, depth and page limits, optional sitemap seeding. |
 | `map` | Lists a site's URLs from sitemaps and the start page without reading them; `search` orders them by relevance. |
 | `extract` | Structured JSON: your CSS selectors (`css::text`, `css::attr(href)`, nested `fields`), tables as rows and records, JSON-LD, metadata, links, and `__NEXT_DATA__`-style embedded state. |

@@ -13,6 +13,7 @@ from .page import domain_of
 
 _TRACKING = re.compile(r"^(utm_\w+|fbclid|gclid|msclkid|mc_cid|mc_eid|igshid|ref_src|_hsenc|_hsmi|yclid)$")
 _TIME = {"day": "d", "week": "w", "month": "m", "year": "y", "d": "d", "w": "w", "m": "m", "y": "y"}
+_DAYS = {"day": 1, "week": 7, "month": 31, "year": 366, "d": 1, "w": 7, "m": 31, "y": 366}
 _SEARCH_TTL = 900
 
 
@@ -194,8 +195,12 @@ def searxng(f, q, n, o):
 
 
 def arxiv(f, q, n, o):
+    # "all:a b c" matches any one word; every word must be required for relevant results
+    words = [w for w in re.findall(r"[\w-]+", re.sub(r"\bsite:\S+", "", q)) if len(w) > 1][:10]
+    query = " AND ".join("all:" + w for w in words) or "all:" + q
     r = f.fetch("https://export.arxiv.org/api/query?" + urlencode(
-        {"search_query": "all:" + q, "max_results": n, "sortBy": "relevance"}), robots=False, max_age=_SEARCH_TTL)
+        {"search_query": query, "max_results": n, "sortBy": "relevance"}), robots=False, max_age=_SEARCH_TTL,
+        timeout=10, retries=1)
     if not r.ok:
         raise RuntimeError(r.error)
     ns = {"a": "http://www.w3.org/2005/Atom"}
@@ -244,8 +249,12 @@ def crossref(f, q, n, o):
 
 
 def hackernews(f, q, n, o):
-    data = _json(f, "https://hn.algolia.com/api/v1/search?" + urlencode({"query": q, "hitsPerPage": min(n, 30)}),
-                 max_age=_SEARCH_TTL)
+    params = {"query": q, "hitsPerPage": min(n, 30)}
+    days = _DAYS.get(o.get("time"))
+    if days:
+        import time as _time
+        params["numericFilters"] = f"created_at_i>{int(_time.time()) - days * 86400}"
+    data = _json(f, "https://hn.algolia.com/api/v1/search?" + urlencode(params), max_age=_SEARCH_TTL)
     out = []
     for h in data.get("hits", []):
         thread = f"https://news.ycombinator.com/item?id={h.get('objectID')}"
@@ -254,6 +263,38 @@ def hackernews(f, q, n, o):
                           (h.get("created_at") or "")[:10],
                           f"{h.get('points') or 0} points, {h.get('num_comments') or 0} comments | {thread}"))
     return [r for r in out if r.title]
+
+
+def parse_bingnews(xml: bytes, days: int | None = None) -> list:
+    import datetime
+    from email.utils import parsedate_to_datetime
+    try:
+        items = list(ET.fromstring(xml).iter("item"))
+    except ET.ParseError:
+        raise RuntimeError("reply was not an RSS feed") from None
+    out = []
+    for it in items:
+        link = (it.findtext("link") or "").strip()
+        real = parse_qs(urlsplit(link).query).get("url", [""])[0] if "apiclick" in link else link
+        try:
+            when = parsedate_to_datetime(it.findtext("pubDate") or "")
+        except (TypeError, ValueError):
+            when = None
+        if days and when is not None and (datetime.datetime.now(when.tzinfo) - when).days > days:
+            continue
+        source = next((c.text or "" for c in it if c.tag.endswith("}Source")), "")
+        out.append(Result(_clean(it.findtext("title")), real, _clean(it.findtext("description"))[:400], "bingnews",
+                          when.strftime("%Y-%m-%d") if when else "", source.strip()))
+    return out
+
+
+def bingnews(f, q, n, o):
+    """Bing's public news RSS feed: recent articles with publication dates and direct links."""
+    r = f.fetch("https://www.bing.com/news/search?" + urlencode({"q": q, "format": "rss"}), max_age=_SEARCH_TTL,
+                timeout=10, retries=1)
+    if not r.ok:
+        raise RuntimeError(r.error)
+    return parse_bingnews(r.body, _DAYS.get(o.get("time")))[:n]
 
 
 def github(f, q, n, o):
@@ -279,13 +320,13 @@ def stackexchange(f, q, n, o):
             for i in data.get("items", [])]
 
 
-ENGINES = {"ddg": ddg, "mojeek": mojeek, "wikipedia": wikipedia, "brave": brave, "searxng": searxng,
+ENGINES = {"ddg": ddg, "bingnews": bingnews, "mojeek": mojeek, "wikipedia": wikipedia, "brave": brave, "searxng": searxng,
            "arxiv": arxiv, "openalex": openalex, "crossref": crossref, "hackernews": hackernews,
            "github": github, "stackexchange": stackexchange}
 WEIGHT = {"wikipedia": 0.5, "mojeek": 0.7}
 VERTICALS = {
     "web": ["ddg", "wikipedia"],            # mojeek is opt-in: it 403s automated clients
-    "news": ["ddg", "hackernews"],
+    "news": ["bingnews", "ddg", "hackernews"],
     "papers": ["openalex", "arxiv", "crossref"],
     "code": ["github", "stackexchange", "ddg"],
     "discussions": ["hackernews", "ddg"],
@@ -320,7 +361,7 @@ def search(f: Fetcher, query: str, n: int = 10, *, vertical: str = "web", engine
     scoped = [site] if site else (include if 0 < len(include) <= 4 else [])
     jobs = []
     for name in names:
-        if scoped and name in ("ddg", "mojeek", "brave", "searxng"):
+        if scoped and name in ("ddg", "bingnews", "mojeek", "brave", "searxng"):
             jobs += [(name, f"{query} site:{d}") for d in scoped]
         else:
             jobs.append((name, query))
