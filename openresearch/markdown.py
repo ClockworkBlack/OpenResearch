@@ -85,7 +85,7 @@ class Converter:
         if t == "a":
             text = _WS.sub(" ", inner).strip()
             href = self._url(node.get("href"))
-            if not text:
+            if not text or text in ("¶", "#", "§", "🔗"):       # empty, or a heading's permalink marker
                 return ""
             if self.links == "none" or not href:
                 return inner
@@ -204,6 +204,10 @@ class Converter:
         nested = any(n.tag == "table" for n in node.elements())
         rows = [] if nested else [r for r in self.table_rows(node) if any(r)]
         ncols = max((len(r) for r in rows), default=0)
+        rows = [r + [""] * (ncols - len(r)) for r in rows]
+        keep = [i for i in range(ncols) if any(r[i] for r in rows)]      # spacer columns carry nothing
+        if len(keep) < ncols:
+            rows, ncols = [[r[i] for i in keep] for r in rows], len(keep)
         if nested or ncols < 2 or any(len(c) > 600 for r in rows for c in r):
             out = []
             for n in node.children:      # layout table: just read it top to bottom
@@ -224,7 +228,13 @@ class Converter:
         return out
 
     def convert(self, node: Node) -> str:
-        md = "\n\n".join(b for b in self.blocks(node) if b.strip())
+        blocks, last = [], None
+        for b in self.blocks(node):
+            if not b.strip() or (b == last and len(b) > 40):     # the same block twice in a row is a
+                continue                                         # desktop/mobile duplicate, not content
+            blocks.append(b)
+            last = b
+        md = "\n\n".join(blocks)
         md = re.sub(r"\n{3,}", "\n\n", md)
         md = re.sub(r"[ \t]+\n", "\n", md)
         return md.strip()

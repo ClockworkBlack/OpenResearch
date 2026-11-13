@@ -58,6 +58,19 @@ def _clean(s) -> str:
 
 # ------------------------------------------------------------------ engines
 
+def _json(f: Fetcher, url: str, **kw):
+    """JSON from a search API. Raises with the real reason (rate limit, HTTP status) so the report shows it,
+    and gives up quickly: a slow engine must not hold the others back."""
+    kw.setdefault("timeout", 10)
+    r = f.fetch(url, robots=False, retries=1, **kw)
+    if not r.ok:
+        raise RuntimeError(r.error or f"HTTP {r.status}")
+    try:
+        return r.json()
+    except ValueError:
+        raise RuntimeError("reply was not JSON") from None
+
+
 def _ddg_unwrap(href: str) -> str:
     if "duckduckgo.com/y.js" in href:
         return ""                                   # ad click-through
@@ -153,11 +166,9 @@ def mojeek(f, q, n, o):
 def wikipedia(f, q, n, o):
     lang = (o.get("lang") or "en").split("-")[0]
     q = re.sub(r"\bsite:\S+", "", q).strip()
-    data = f.get_json(f"https://{lang}.wikipedia.org/w/api.php?" + urlencode(
+    data = _json(f, f"https://{lang}.wikipedia.org/w/api.php?" + urlencode(
         {"action": "query", "list": "search", "srsearch": q, "srlimit": min(n, 10), "format": "json"}),
         max_age=_SEARCH_TTL)
-    if data is None:
-        raise RuntimeError("request failed")
     return [Result(h["title"], f"https://{lang}.wikipedia.org/wiki/" + quote(h["title"].replace(" ", "_")),
                    _clean(h.get("snippet")), "wikipedia", (h.get("timestamp") or "")[:10])
             for h in data.get("query", {}).get("search", [])]
@@ -166,11 +177,9 @@ def wikipedia(f, q, n, o):
 def brave(f, q, n, o):
     if not f.cfg.brave_api_key:
         raise RuntimeError("no BRAVE_API_KEY set")
-    data = f.get_json("https://api.search.brave.com/res/v1/web/search?" + urlencode({"q": q, "count": min(n, 20)}),
-                      headers={"X-Subscription-Token": f.cfg.brave_api_key, "Accept": "application/json"},
+    data = _json(f, "https://api.search.brave.com/res/v1/web/search?" + urlencode({"q": q, "count": min(n, 20)}),
+                 headers={"X-Subscription-Token": f.cfg.brave_api_key, "Accept": "application/json"},
                       max_age=_SEARCH_TTL)
-    if data is None:
-        raise RuntimeError("request failed")
     return [Result(_clean(r.get("title")), r.get("url", ""), _clean(r.get("description")), "brave",
                    r.get("page_age", "")[:10]) for r in (data.get("web") or {}).get("results", [])]
 
@@ -178,10 +187,8 @@ def brave(f, q, n, o):
 def searxng(f, q, n, o):
     if not f.cfg.searxng_url:
         raise RuntimeError("no searxng_url configured")
-    data = f.get_json(f.cfg.searxng_url.rstrip("/") + "/search?" + urlencode({"q": q, "format": "json"}),
-                      max_age=_SEARCH_TTL)
-    if data is None:
-        raise RuntimeError("request failed")
+    data = _json(f, f.cfg.searxng_url.rstrip("/") + "/search?" + urlencode({"q": q, "format": "json"}),
+                 max_age=_SEARCH_TTL)
     return [Result(r.get("title", ""), r.get("url", ""), r.get("content", ""), "searxng",
                    (r.get("publishedDate") or "")[:10]) for r in data.get("results", [])[:n]]
 
@@ -203,10 +210,10 @@ def arxiv(f, q, n, o):
 
 
 def openalex(f, q, n, o):
-    data = f.get_json("https://api.openalex.org/works?" + urlencode({"search": q, "per-page": min(n, 25)}),
-                      max_age=_SEARCH_TTL)
-    if data is None:
-        raise RuntimeError("request failed")
+    params = {"search": q, "per-page": min(n, 25)}
+    if f.cfg.openalex_api_key:               # keyless requests share one small daily budget per IP address
+        params["api_key"] = f.cfg.openalex_api_key
+    data = _json(f, "https://api.openalex.org/works?" + urlencode(params), max_age=_SEARCH_TTL)
     out = []
     for w in data.get("results", []):
         inv = w.get("abstract_inverted_index") or {}
@@ -221,10 +228,8 @@ def openalex(f, q, n, o):
 
 
 def crossref(f, q, n, o):
-    data = f.get_json("https://api.crossref.org/works?" + urlencode({"query": q, "rows": min(n, 20)}),
-                      max_age=_SEARCH_TTL)
-    if data is None:
-        raise RuntimeError("request failed")
+    data = _json(f, "https://api.crossref.org/works?" + urlencode({"query": q, "rows": min(n, 20)}),
+                 max_age=_SEARCH_TTL)
     out = []
     for w in data.get("message", {}).get("items", []):
         parts = ((w.get("issued") or {}).get("date-parts") or [[]])[0]
@@ -239,10 +244,8 @@ def crossref(f, q, n, o):
 
 
 def hackernews(f, q, n, o):
-    data = f.get_json("https://hn.algolia.com/api/v1/search?" + urlencode({"query": q, "hitsPerPage": min(n, 30)}),
-                      max_age=_SEARCH_TTL)
-    if data is None:
-        raise RuntimeError("request failed")
+    data = _json(f, "https://hn.algolia.com/api/v1/search?" + urlencode({"query": q, "hitsPerPage": min(n, 30)}),
+                 max_age=_SEARCH_TTL)
     out = []
     for h in data.get("hits", []):
         thread = f"https://news.ycombinator.com/item?id={h.get('objectID')}"
@@ -257,10 +260,8 @@ def github(f, q, n, o):
     headers = {"Accept": "application/vnd.github+json"}
     if f.cfg.github_token:
         headers["Authorization"] = "Bearer " + f.cfg.github_token
-    data = f.get_json("https://api.github.com/search/repositories?" + urlencode({"q": q, "per_page": min(n, 30)}),
-                      headers=headers, max_age=_SEARCH_TTL)
-    if data is None:
-        raise RuntimeError("request failed")
+    data = _json(f, "https://api.github.com/search/repositories?" + urlencode({"q": q, "per_page": min(n, 30)}),
+                 headers=headers, max_age=_SEARCH_TTL)
     return [Result(r.get("full_name", ""), r.get("html_url", ""), r.get("description") or "", "github",
                    (r.get("pushed_at") or "")[:10],
                    f"{r.get('stargazers_count', 0)} stars | {r.get('language') or 'n/a'}")
@@ -268,11 +269,9 @@ def github(f, q, n, o):
 
 
 def stackexchange(f, q, n, o):
-    data = f.get_json("https://api.stackexchange.com/2.3/search/advanced?" + urlencode(
+    data = _json(f, "https://api.stackexchange.com/2.3/search/advanced?" + urlencode(
         {"order": "desc", "sort": "relevance", "q": q, "site": o.get("se_site") or "stackoverflow",
          "pagesize": min(n, 30)}), max_age=_SEARCH_TTL)
-    if data is None:
-        raise RuntimeError("request failed")
     import html as _html
     return [Result(_html.unescape(i.get("title", "")), i.get("link", ""), "", "stackexchange", "",
                    f"score {i.get('score', 0)}, {i.get('answer_count', 0)} answers"

@@ -81,6 +81,9 @@ TOOLS = [
             "links": _s("inline keeps hyperlinks; none drops them to save tokens",
                         enum=["inline", "none"], default="inline"),
             "fresh": {"type": "boolean", "description": "Bypass the cache.", "default": False},
+            "render": {"type": "boolean", "default": False, "description":
+                       "Load the page in a headless browser first (needs Playwright). Use it when a page comes "
+                       "back empty or as a loading placeholder."},
         }},
     },
     {
@@ -132,6 +135,14 @@ TOOLS = [
 ]
 
 
+_TITLES = {"research": "Research a question", "search": "Search the web", "fetch": "Read web pages",
+           "crawl": "Crawl a website", "map": "List a site's URLs", "extract": "Extract structured data"}
+for _t in TOOLS:      # every tool only reads the public web: clients may run them without a confirmation step
+    _t["title"] = _TITLES[_t["name"]]
+    _t["annotations"] = {"title": _TITLES[_t["name"]], "readOnlyHint": True, "destructiveHint": False,
+                         "idempotentHint": True, "openWorldHint": True}
+
+
 def call(f: Fetcher, name: str, a: dict) -> str:
     """Run a tool and return its text result. Raises ValueError for bad input."""
     if name == "research":
@@ -153,7 +164,7 @@ def call(f: Fetcher, name: str, a: dict) -> str:
             raise ValueError("fetch needs at least one URL in `urls`")
         kw = dict(query=a.get("query", ""), max_tokens=int(a.get("max_tokens", 6000)),
                   offset=int(a.get("offset") or 0), mode=a.get("mode", "main"), links=a.get("links", "inline"),
-                  max_age=0 if a.get("fresh") else None)
+                  max_age=0 if a.get("fresh") else None, render="always" if a.get("render") else None)
         pages = read_many(f, urls[:20], **kw)
         return "\n\n---\n\n".join(p.render() for p in pages)
     if name == "crawl":

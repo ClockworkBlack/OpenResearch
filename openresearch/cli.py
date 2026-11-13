@@ -77,6 +77,7 @@ def main(argv=None) -> int:
     p.add_argument("--offset", type=int, default=0)
     p.add_argument("--mode", default="main", choices=["main", "full"])
     p.add_argument("--links", default="inline", choices=["inline", "none"])
+    p.add_argument("--render", action="store_true", help="load in a headless browser first (needs Playwright)")
 
     p = sub.add_parser("crawl", help="crawl a site")
     p.add_argument("url")

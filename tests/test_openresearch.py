@@ -130,6 +130,38 @@ class TestExtract(unittest.TestCase):
         self.assertEqual(full.count("Body paragraph"), 1)
 
 
+    def test_dates(self):
+        from openresearch.extract import norm_date
+        for raw, want in (("2017/06/12", "2017-06-12"), ("12 Jun 2017", "2017-06-12"), ("June 12, 2017", "2017-06-12"),
+                          ("2026-11-13T02:00:00Z", "2026-11-13"), ("May 2026", ""), ("13/45/2026", "")):
+            self.assertEqual(norm_date(raw), want, raw)
+        page = "<html><head>{}</head><body><main><p>" + "Words, words and more words. " * 20 + "</p>{}</main></body></html>"
+        meta = extract_html(page.format('<meta name="citation_online_date" content="2023/08/02">'
+                                        '<meta name="citation_date" content="2017/06/12">', ""))
+        self.assertEqual(meta["published"], "2017-06-12")
+        ld = '<script type="application/ld+json">[{"@type":"Article","datePublished":"3 March 2024"}]</script>'
+        self.assertEqual(extract_html(page.format(ld, ""))["published"], "2024-03-03")
+        self.assertEqual(extract_html(page.format("", ""), "https://x.example/2025/01/09/post")["published"], "2025-01-09")
+        listing = '<time datetime="2026-01-01">a</time><time datetime="2026-02-02">b</time>'
+        self.assertEqual(extract_html(page.format("", listing))["published"], "")       # a listing has no one date
+
+    def test_markdown_cleanups(self):
+        para = "<p>Real paragraph text with enough words, commas, and substance to be kept as content.</p>"
+        toc = ("<ul><li><a href='#one'>Section one</a></li><li><a href='#two'>Section two</a></li>"
+               "<li><a href='#three'>Section three</a></li></ul>")
+        html = ("<html><body><main>" + toc + "<h2>Section one<a class='headerlink' href='#one'>¶</a></h2>" + para * 3
+                + "<dl><dt>setting<a href='#setting'>¶</a></dt><dd>What it does.</dd></dl>"
+                + "<ul><li>A promo line long enough to matter, shown for desktop and for mobile</li></ul>" * 2
+                + "<table><tr><td>1.</td><td></td><td>First story</td></tr><tr><td>2.</td><td></td>"
+                  "<td>Second story</td></tr></table></main></body></html>")
+        md = extract_html(html)["markdown"]
+        self.assertNotIn("Section three", md)                # jump-link table of contents
+        self.assertNotIn("¶", md)
+        self.assertIn("## Section one\n", md)
+        self.assertEqual(md.count("A promo line"), 1)        # back-to-back duplicate block
+        self.assertIn("| 1. | First story |\n| --- | --- |\n| 2. | Second story |", md)   # spacer column gone
+
+
 class TestRank(unittest.TestCase):
     def test_focus_returns_relevant_passage_only(self):
         md = extract_html(ARTICLE, "http://news.example/article")["markdown"] + "\n\n" + "\n\n".join(
@@ -241,6 +273,16 @@ class TestFetch(Base):
         self.assertEqual((p.via, p.snapshot[:8]), ("wayback", "20250101"))
         self.assertIn("Internet Archive copy from 20250101", p.render())
 
+    def test_blocked_pages_say_why_and_fail_fast(self):
+        p = read(self.f, self.base + "/challenge")
+        self.assertIn("HTTP 403", p.error)
+        self.assertIn("browser check", p.error)
+        r = self.f.fetch(self.base + "/busy")
+        self.assertIn("rate limited", r.error)
+        self.assertEqual(self.site.hits["/busy"], 1)          # Retry-After: 1 hour is not worth waiting for
+        self.f.fetch(self.base + "/down", retries=0)
+        self.assertEqual(self.site.hits["/down"], 1)
+
     def test_read_many_keeps_order(self):
         pages = read_many(self.f, [self.base + "/docs/b", self.base + "/missing", self.base + "/docs/a"])
         self.assertEqual([p.title for p in pages], ["Docs: Configure", "", "Docs: Install"])
@@ -336,6 +378,14 @@ class TestSearch(Base):
 
         return {"one": one, "two": two, "broken": broken}
 
+    def test_engine_errors_name_the_cause(self):
+        with self.assertRaises(RuntimeError) as cm:
+            S._json(self.f, self.base + "/busy")
+        self.assertIn("429", str(cm.exception))
+        with self.assertRaises(RuntimeError) as cm:
+            S._json(self.f, self.base + "/article")
+        self.assertIn("not JSON", str(cm.exception))
+
     def test_fusion(self):
         old = dict(S.ENGINES)
         S.ENGINES.update(self._fake_engines())
@@ -368,9 +418,33 @@ class TestSearch(Base):
         self.assertIn("## Sources", text)
         self.assertIn("[1] Docs: Configure", text)                     # best passage's source is numbered first
         self.assertIn("broken FAILED", text)
-        self.assertIn("Could not read: https://spam.example/x", text)
+        self.assertIn("Could not read:\n- https://spam.example/x", text)
         self.assertNotIn("Cats sleep", text)                           # irrelevant page contributes nothing
         self.assertLess(rank.est_tokens(text), 3200)
+
+
+    def test_research_replaces_failed_pages(self):
+        base, dead = self.base, "http://127.0.0.1:1/gone"
+
+        def flaky(f, q, n, o):
+            return [S.Result("Gone", dead, "The widget frequency is 42 hertz by default.", "flaky", "2026-01-02"),
+                    S.Result("Configure", base + "/docs/b", "", "flaky", "2026-02-03")]
+
+        old = dict(S.ENGINES)
+        S.ENGINES["flaky"] = flaky
+        self.f.cfg.engines = ["flaky"]
+        self.f.cfg.retries = 0
+        try:
+            out = research(self.f, "widget frequency", queries=["widget frequency"], max_pages=1)
+        finally:
+            S.ENGINES.clear()
+            S.ENGINES.update(old)
+        text = out["text"]
+        self.assertIn("42 hertz in the settings file", text)            # the next result took the dead page's slot
+        self.assertIn("2026-02-03 (date from search listing)", text)    # undated page borrows the listing's date
+        self.assertIn(f"- {dead} (", text)
+        self.assertIn('search snippet: "The widget frequency is 42 hertz by default."', text)
+        self.assertEqual(out["unread"], [])
 
 
 class TestMcp(Base):
@@ -386,6 +460,7 @@ class TestMcp(Base):
         self.assertEqual({t["name"] for t in tools}, {"research", "search", "fetch", "crawl", "map", "extract"})
         for t in tools:
             self.assertEqual(t["inputSchema"]["type"], "object")
+            self.assertTrue(t["annotations"]["readOnlyHint"])
             json.dumps(t)
         self.assertEqual(self.srv.handle({"jsonrpc": "2.0", "id": 3, "method": "nope"})["error"]["code"], -32601)
 

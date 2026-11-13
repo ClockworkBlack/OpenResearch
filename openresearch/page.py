@@ -208,12 +208,13 @@ def _convert(r: Response, mode: str, links: str, images: bool) -> dict:
 
 def _wayback(f: Fetcher, url: str):
     """Closest Internet Archive snapshot of a URL, as (Response, timestamp) or (None, '')."""
-    info = f.get_json("https://archive.org/wayback/available?url=" + quote(url, safe=""), max_age=3600, timeout=10)
+    info = f.get_json("https://archive.org/wayback/available?url=" + quote(url, safe=""), max_age=3600, timeout=8,
+                      retries=0)
     snap = ((info or {}).get("archived_snapshots") or {}).get("closest") or {}
     ts = snap.get("timestamp")
     if not ts or not snap.get("available"):
         return None, ""
-    r = f.fetch(f"https://web.archive.org/web/{ts}id_/{url}", robots=False, max_age=86400)
+    r = f.fetch(f"https://web.archive.org/web/{ts}id_/{url}", robots=False, max_age=86400, timeout=12, retries=0)
     return (r, ts) if r.ok else (None, "")
 
 
@@ -262,7 +263,7 @@ def _render_js(f: Fetcher, url: str):
 def read(f: Fetcher, url: str, *, query: str = "", max_tokens: int = 6000, offset: int = 0,
          mode: str = "main", links: str = "inline", images: bool = False, max_age: int | None = None,
          render: str | None = None, fallback: bool | None = None, timeout: float | None = None,
-         delay: float | None = None) -> Page:
+         delay: float | None = None, retries: int | None = None) -> Page:
     """Fetch a URL and return it as a Page with token-budgeted Markdown in .content.
 
     query      keep only the passages relevant to this question (big token saver)
@@ -271,7 +272,7 @@ def read(f: Fetcher, url: str, *, query: str = "", max_tokens: int = 6000, offse
     """
     render = render or f.cfg.render
     fallback = f.cfg.wayback_fallback if fallback is None else fallback
-    r = f.fetch(url, max_age=max_age, timeout=timeout, delay=delay)
+    r = f.fetch(url, max_age=max_age, timeout=timeout, delay=delay, retries=retries)
     page = Page(url=url, final_url=r.final_url or r.url, status=r.status, via=r.via,
                 content_type=r.content_type, fetched_at=r.fetched_at)
     data = None

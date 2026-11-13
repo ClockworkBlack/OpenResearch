@@ -17,7 +17,7 @@ from .config import VERSION
 from .fetch import Fetcher
 from .tools import TOOLS, call
 
-PROTOCOLS = ("2025-06-18", "2025-03-26", "2024-11-05")
+PROTOCOLS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
 INSTRUCTIONS = (
     "OpenResearch reads the web. Start with `research` for questions that need several sources (write 2-5 "
     "of your own queries). Use `search` then `fetch` for targeted lookups; always pass `query` to `fetch` on "

@@ -141,6 +141,7 @@ Environment variables (or the same keys, lower-case, in `~/.config/openresearch/
 | `OPENRESEARCH_ENGINES` | `ddg,wikipedia` | Web engines to use (`mojeek` is opt-in: it refuses many automated clients) |
 | `OPENRESEARCH_SEARXNG_URL` | | Add your own SearXNG instance as an engine |
 | `BRAVE_API_KEY` | | Add Brave Search as an engine |
+| `OPENRESEARCH_OPENALEX_API_KEY` | | Your own OpenAlex key for paper search (keyless requests share a small daily budget per IP address) |
 | `OPENRESEARCH_CACHE_TTL` | `3600` | Seconds a cached page stays fresh |
 | `OPENRESEARCH_CACHE_DIR` | `~/.cache/openresearch` | Cache location |
 | `OPENRESEARCH_RESPECT_ROBOTS` | `1` | Obey `robots.txt` |

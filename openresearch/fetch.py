@@ -59,6 +59,22 @@ class Response:
         return json.loads(self.text)
 
 
+_CHALLENGE = re.compile(rb"just a moment\.\.\.|attention required|verify(?:ing)? (?:that )?you are (?:a )?human|"
+                        rb"captcha|unusual traffic|access denied|are you a robot|enable javascript and cookies", re.I)
+
+
+def _block_reason(status: int, headers: dict, body: bytes) -> str:
+    """Say why a page was refused, so the caller can stop retrying and pick another source."""
+    if status == 429:
+        return " (rate limited by the site)"
+    if status in (401, 403, 503):
+        if headers.get("cf-mitigated") == "challenge" or _CHALLENGE.search(body[:4000]):
+            return " (the site blocks automated readers with a browser check)"
+        if status == 401:
+            return " (login required)"
+    return ""
+
+
 def decode(body: bytes, content_type: str = "") -> str:
     if body.startswith(b"\xef\xbb\xbf"):
         return body[3:].decode("utf-8", "replace")
@@ -299,8 +315,10 @@ class Fetcher:
 
     def fetch(self, url: str, *, max_age: int | None = None, headers: dict | None = None,
               robots: bool | None = None, timeout: float | None = None, data: bytes | None = None,
-              delay: float | None = None) -> Response:
-        """GET (or POST when data is given) a URL. Never raises: check .ok / .error."""
+              delay: float | None = None, retries: int | None = None) -> Response:
+        """GET (or POST when data is given) a URL. Never raises: check .ok / .error.
+
+        retries overrides the configured retry count (0 = one attempt), for callers on a time budget."""
         try:
             url = normalize_url(url)
         except ValueError as e:
@@ -332,18 +350,21 @@ class Fetcher:
 
         cur, status, hdrs, body, error = url, 0, {}, b"", ""
         timeout = timeout or self.cfg.timeout
+        tries = max(self.cfg.retries if retries is None else retries, 0)
         for _hop in range(8):
-            for attempt in range(self.cfg.retries + 1):
+            for attempt in range(tries + 1):
                 self._throttle(cur, delay)
                 status, hdrs, body, error = self._once(cur, h, timeout, data)
                 transient = status in _RETRY_STATUS or (
                     status == 0 and not re.search(r"403|407|certificate|larger than|decompress", error, re.I))
-                if not transient or attempt == self.cfg.retries:
+                if not transient or attempt == tries:
                     break
                 try:
                     pause = float(hdrs.get("retry-after", ""))
                 except ValueError:
                     pause = 0.6 * (2 ** attempt)
+                if pause > 10:                       # told to come back much later: waiting won't help now
+                    break
                 time.sleep(min(pause, 10.0) + random.random() * 0.3)
             if status in _REDIRECT and hdrs.get("location"):
                 cur = normalize_url(urljoin(cur, hdrs["location"]))
@@ -366,7 +387,7 @@ class Fetcher:
         if status == 200 and not error:
             self.cache.put(key, r)
         elif not error:
-            r.error = f"HTTP {status}"
+            r.error = f"HTTP {status}" + _block_reason(status, hdrs, body)
         return r
 
     def get_json(self, url: str, **kw):
