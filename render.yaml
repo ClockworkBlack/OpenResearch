@@ -1,0 +1,12 @@
+# One-click hosting for the Claude connector (web, desktop and mobile apps).
+# Deploy: https://render.com/deploy?repo=https://github.com/ClockworkBlack/OpenResearch
+# Render generates OPENRESEARCH_TOKEN; the connector URL is https://<service>.onrender.com/mcp/<that token>
+services:
+  - type: web
+    name: openresearch
+    runtime: docker
+    plan: free            # sleeps after 15 idle minutes; "starter" stays awake
+    healthCheckPath: /health
+    envVars:
+      - key: OPENRESEARCH_TOKEN
+        generateValue: true
