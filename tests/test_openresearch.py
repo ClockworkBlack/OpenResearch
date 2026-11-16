@@ -393,6 +393,24 @@ class TestSearch(Base):
             S.parse_bingnews(b"<html>not a feed")
         self.assertEqual(S.engines_for(self.f, "news")[0], "bingnews")
 
+    def test_tavily(self):
+        with mock.patch.object(S, "_TAVILY_URL", self.base + "/tavily"):
+            with self.assertRaises(RuntimeError) as cm:
+                S.tavily(self.f, "widgets", 5, {})
+            self.assertIn("no TAVILY_API_KEY", str(cm.exception))
+            self.assertNotIn("tavily", S.engines_for(self.f, "web"))
+            self.f.cfg.tavily_api_key = "tvly-good"
+            self.assertEqual(S.engines_for(self.f, "web")[0], "tavily")           # used first once a key is set
+            rows = S.tavily(self.f, "widgets site:w.example", 5, {"time": "week"})
+            self.assertEqual((rows[0].title, rows[0].url, rows[0].date), ("Widget guide", "https://w.example/guide", "2026-11-12"))
+            path, auth, body = self.site.posts[-1]
+            self.assertEqual(body, {"query": "widgets", "max_results": 5, "search_depth": "basic",
+                                    "include_domains": ["w.example"], "time_range": "week"})
+            self.f.cfg.tavily_api_key = "tvly-bad"
+            with self.assertRaises(RuntimeError) as cm:
+                S.tavily(self.f, "other widgets", 5, {})
+            self.assertIn("401", str(cm.exception))
+
     def test_mojeek_is_opt_in(self):
         self.assertNotIn("mojeek", S.engines_for(self.f, "web"))
         self.assertEqual(S.engines_for(self.f, "web", ["mojeek"]), ["mojeek"])
@@ -900,6 +918,9 @@ class TestLog(Base):
             self.assertIn("/article -> read", get(f"/log/a+b/c=?id={call_id}")[1])
             self.assertEqual(get("/log")[0], 404)
             self.assertEqual(get("/log/wrong")[0], 404)
+            health = json.loads(get("/health")[1])
+            self.assertIn("OPENRESEARCH_LOG_GITHUB_TOKEN are not set", health["log_copy"])   # names only, no values
+            self.assertEqual(health["search_keys"], [])
         finally:
             srv.shutdown()
             srv.server_close()

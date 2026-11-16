@@ -10,6 +10,7 @@ from urllib.parse import parse_qs, quote, unquote, urlencode, urlsplit, urlunspl
 
 from . import trace
 from .dom import parse, select, select_one
+from .extract import norm_date
 from .fetch import Fetcher
 from .page import domain_of
 from .rank import tokens
@@ -225,6 +226,27 @@ def brave(f, q, n, o):
                    (r.get("page_age") or "")[:10]) for r in (data.get("web") or {}).get("results", [])]
 
 
+_TAVILY_URL = "https://api.tavily.com/search"
+
+
+def tavily(f, q, n, o):
+    """Tavily's search API (needs a key; it has a free monthly allowance). One credit per query."""
+    import json as _json_mod
+    if not f.cfg.tavily_api_key:
+        raise RuntimeError("no TAVILY_API_KEY set")
+    sites = re.findall(r"\bsite:(\S+)", q)
+    body = {"query": re.sub(r"\bsite:\S+", "", q).strip(), "max_results": min(n, 20), "search_depth": "basic"}
+    if sites:
+        body["include_domains"] = sites
+    if o.get("time") in ("day", "week", "month", "year"):
+        body["time_range"] = o["time"]
+    data = _json(f, _TAVILY_URL, data=_json_mod.dumps(body).encode("utf-8"), max_age=_SEARCH_TTL,
+                 headers={"Authorization": "Bearer " + f.cfg.tavily_api_key.strip(), "Content-Type": "application/json"})
+    return [Result(_clean(r.get("title")), r.get("url", ""), _clean(r.get("content"))[:500], "tavily",
+                   norm_date(r.get("published_date") or ""))
+            for r in data.get("results", []) if isinstance(r, dict)]
+
+
 def searxng(f, q, n, o):
     if not f.cfg.searxng_url:
         raise RuntimeError("no searxng_url configured")
@@ -362,7 +384,7 @@ def stackexchange(f, q, n, o):
             for i in data.get("items", [])]
 
 
-ENGINES = {"ddg": ddg, "bingnews": bingnews, "mojeek": mojeek, "wikipedia": wikipedia, "brave": brave, "searxng": searxng,
+ENGINES = {"tavily": tavily, "ddg": ddg, "bingnews": bingnews, "mojeek": mojeek, "wikipedia": wikipedia, "brave": brave, "searxng": searxng,
            "arxiv": arxiv, "openalex": openalex, "crossref": crossref, "hackernews": hackernews,
            "github": github, "stackexchange": stackexchange}
 WEIGHT = {"wikipedia": 0.5, "mojeek": 0.7}
@@ -388,6 +410,8 @@ def engines_for(f: Fetcher, vertical: str, engines=None) -> list:
             names = [e for e in f.cfg.engines if e in ENGINES]
         if f.cfg.brave_api_key and "brave" not in names:
             names.insert(0, "brave")
+        if f.cfg.tavily_api_key and "tavily" not in names:
+            names.insert(0, "tavily")
         if f.cfg.searxng_url and "searxng" not in names:
             names.insert(0, "searxng")
     return names
@@ -410,7 +434,7 @@ def search(f: Fetcher, query: str, n: int = 10, *, vertical: str = "web", engine
     def plan(engine_names) -> list:
         jobs = []
         for name in engine_names:
-            if scoped and name in ("ddg", "bingnews", "mojeek", "brave", "searxng"):
+            if scoped and name in ("tavily", "ddg", "bingnews", "mojeek", "brave", "searxng"):
                 jobs += [(name, f"{query} site:{d}") for d in scoped]
             else:
                 jobs.append((name, query))

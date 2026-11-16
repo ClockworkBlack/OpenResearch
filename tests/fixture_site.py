@@ -89,6 +89,7 @@ class Site:
     def __init__(self):
         self.hits = {}
         self.puts = []
+        self.posts = []
         site = self
 
         class H(BaseHTTPRequestHandler):
@@ -104,6 +105,16 @@ class Site:
                     self.send_header(k, v)
                 self.end_headers()
                 self.wfile.write(body)
+
+            def do_POST(self):                    # stands in for a search API that takes a JSON body
+                import json
+                body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
+                site.posts.append((self.path, self.headers.get("Authorization", ""), body))
+                if self.headers.get("Authorization") != "Bearer tvly-good":
+                    return self._send(401, '{"detail": "bad key"}', "application/json")
+                self._send(200, json.dumps({"results": [
+                    {"title": "Widget <b>guide</b>", "url": "https://w.example/guide", "content": "All about widgets.",
+                     "published_date": "Thu, 12 Nov 2026 12:17:00 GMT", "score": 0.9}]}), "application/json")
 
             def do_PUT(self):                     # stands in for GitHub's "create a file" API
                 import json

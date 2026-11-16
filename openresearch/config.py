@@ -34,6 +34,7 @@ class Config:
     prefer_domains: list = field(default_factory=list)   # rank these higher
     searxng_url: str = ""
     brave_api_key: str = ""
+    tavily_api_key: str = ""
     github_token: str = ""
     openalex_api_key: str = ""
     tool_timeout: float = 50.0       # seconds a tool call may take before it returns what it has (0 = no limit)
@@ -64,6 +65,8 @@ class Config:
                 raw = os.environ.get("GITHUB_TOKEN") if os.environ.get("GITHUB_TOKEN") != "proxy-injected" else None
             if raw is None and f.name == "brave_api_key":
                 raw = os.environ.get("BRAVE_API_KEY")
+            if raw is None and f.name == "tavily_api_key":
+                raw = os.environ.get("TAVILY_API_KEY")
             cur = getattr(cfg, f.name)
             if raw is not None:
                 if isinstance(cur, bool):

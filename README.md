@@ -176,6 +176,7 @@ Environment variables (or the same keys, lower-case, in `~/.config/openresearch/
 | `OPENRESEARCH_ENGINES` | `ddg,wikipedia` | Web engines to use (`mojeek` is opt-in: it refuses many automated clients) |
 | `OPENRESEARCH_SEARXNG_URL` | | Add your own SearXNG instance as an engine |
 | `BRAVE_API_KEY` | | Add Brave Search as an engine |
+| `TAVILY_API_KEY` | | Add Tavily as an engine |
 | `OPENRESEARCH_OPENALEX_API_KEY` | | Your own OpenAlex key for paper search (keyless requests share a small daily budget per IP address) |
 | `OPENRESEARCH_TOOL_TIMEOUT` | `50` | Seconds a tool call may take before it returns what it has (`0` = no limit) |
 | `OPENRESEARCH_ENGINE_TIMEOUT` | `12` | Seconds to wait for any one search engine |
@@ -212,7 +213,16 @@ subscription, copy the key from the dashboard's *API keys* page, then:
 export BRAVE_API_KEY=your-key-here
 ```
 
-**3. SearXNG (your own server, no key).** Point OpenResearch at an instance you run; it needs the
+**3. Tavily (key, free monthly allowance).** A search API made for AI tools. Sign up at
+<https://app.tavily.com>, copy the API key (it starts with `tvly-`), then:
+
+```bash
+export TAVILY_API_KEY=tvly-your-key-here
+```
+
+Each search query uses one credit; a `research` call usually runs two to four queries.
+
+**4. SearXNG (your own server, no key).** Point OpenResearch at an instance you run; it needs the
 JSON format turned on (`search: formats: [html, json]` in its `settings.yml`).
 
 ```bash
@@ -225,7 +235,7 @@ To keep settings without environment variables, put the same names, lower-case a
 `OPENRESEARCH_` prefix, in `~/.config/openresearch/config.json`:
 
 ```json
-{"brave_api_key": "your-key-here", "searxng_url": "https://searx.example.org"}
+{"brave_api_key": "your-key-here", "tavily_api_key": "tvly-your-key-here"}
 ```
 
 **In a Claude Code cloud session**, keep keys out of the repository and out of chat: save the Brave key

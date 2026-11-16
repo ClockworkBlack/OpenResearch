@@ -15,3 +15,6 @@ services:
         sync: false
       - key: OPENRESEARCH_LOG_GITHUB_TOKEN
         sync: false
+      # Optional: a dependable search engine (README: Search backends)
+      - key: TAVILY_API_KEY
+        sync: false
