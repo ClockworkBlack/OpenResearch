@@ -198,6 +198,7 @@ Environment variables (or the same keys, lower-case, in `~/.config/openresearch/
 | `OPENRESEARCH_MIN_DELAY` | `0.3` | Seconds between requests to one host |
 | `OPENRESEARCH_WAYBACK_FALLBACK` | `1` | Use the Internet Archive when a page is blocked or gone |
 | `OPENRESEARCH_RENDER` | `auto` | `auto`, `never` or `always` for JavaScript rendering |
+| `OPENRESEARCH_RENDER_CONCURRENCY` | `1` | Browsers open at once (each needs a few hundred MB) |
 | `OPENRESEARCH_USER_AGENT` | identifies as OpenResearch | Request User-Agent |
 
 ## Search backends
@@ -319,6 +320,13 @@ it has, and says what it skipped. No search engine is waited for longer than
 engines are slow or nearly empty, backup engines (DuckDuckGo when a keyed engine is set, Bing News,
 Hacker News) fill in. An engine that gives
 no answer twice in a row is left out for three minutes, so later calls do not wait for it again.
+
+**Browser in the Docker image.** The image includes Playwright with Chromium's headless shell, so
+pages built by JavaScript (including content inside web components, as on MSN) are rendered on the
+server: automatically by `fetch` and `crawl` when a page arrives empty, or on request with `render`.
+`research` never renders, to stay fast. One page renders at a time. On a host with 512 MB (Render's
+free and starter plans) a very heavy page can run the browser out of memory: that render fails and is
+logged, the server keeps running. Set `OPENRESEARCH_RENDER=never` to switch rendering off.
 
 ## How it behaves
 

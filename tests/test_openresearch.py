@@ -1176,6 +1176,7 @@ class TestLog(Base):
             health = json.loads(get("/health")[1])
             self.assertIn("OPENRESEARCH_LOG_GITHUB_TOKEN are not set", health["log_copy"])   # names only, no values
             self.assertEqual(health["search_keys"], [])
+            self.assertEqual(health["browser"], "off (OPENRESEARCH_RENDER=never)")    # the tests turn rendering off
             self.assertEqual((health["web_engines"], health["web_fallbacks"]),
                              (["ddg", "wikipedia"], ["bingnews", "hackernews"]))
         finally:

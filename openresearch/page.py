@@ -6,6 +6,7 @@ import json
 import re
 import shutil
 import subprocess
+import threading
 import time
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, wait
@@ -229,17 +230,61 @@ def _wayback(f: Fetcher, url: str):
     return (r, ts) if r.ok else (None, "")
 
 
+# Copies open shadow-DOM content (web components, as on MSN) into the page so the snapshot includes it;
+# page.content() alone leaves it out.
+_FLATTEN_SHADOW = """() => {
+  const flatten = (root) => {
+    root.querySelectorAll('*').forEach((el) => {
+      if (el.shadowRoot) {
+        flatten(el.shadowRoot);
+        const holder = document.createElement('div');
+        holder.setAttribute('data-shadow-root', '');
+        holder.innerHTML = el.shadowRoot.innerHTML;
+        el.appendChild(holder);
+      }
+    });
+  };
+  flatten(document);
+  return '<!doctype html>' + document.documentElement.outerHTML;
+}"""
+# Chromium settings for a small container: one renderer, a capped JS heap, nothing it does not need.
+_BROWSER_ARGS = ["--disable-dev-shm-usage", "--disable-gpu", "--no-first-run", "--no-zygote",
+                 "--renderer-process-limit=1", "--disable-extensions", "--disable-background-networking",
+                 "--disable-default-apps", "--disable-sync", "--mute-audio", "--js-flags=--max-old-space-size=192"]
+
+_render_slots: dict = {}
+_render_lock = threading.Lock()
+
+
+def browser_available() -> bool:
+    try:
+        import playwright  # type: ignore  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
 def _render_js(f: Fetcher, url: str):
-    """Load a page in headless Chromium via Playwright, if it is installed. Returns HTML or None."""
+    """Load a page in headless Chromium via Playwright, if it is installed. Returns HTML or None, and
+    records why in the call log when it fails. Only `render_concurrency` browsers run at once: each
+    takes a few hundred MB, and a small host runs out of memory long before it runs out of CPU."""
     try:
         from playwright.sync_api import sync_playwright  # type: ignore
     except ImportError:
+        trace.event("render", url=url, error="Playwright is not installed")
         return None
     import os
+    with _render_lock:
+        slots = _render_slots.setdefault(max(1, f.cfg.render_concurrency),
+                                         threading.BoundedSemaphore(max(1, f.cfg.render_concurrency)))
+    if not slots.acquire(timeout=max(trace.remaining(30) - 8, 0.1)):
+        trace.event("render", url=url, error="skipped: another page was being rendered and time ran short")
+        return None
     proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
     try:
         with sync_playwright() as p:
-            kw = {"headless": True}
+            # containers give Chromium a tiny /dev/shm; without this flag it crashes on big pages
+            kw = {"headless": True, "args": list(_BROWSER_ARGS)}
             if proxy:
                 kw["proxy"] = {"server": proxy, "bypass": os.environ.get("NO_PROXY", "")}
             try:
@@ -252,7 +297,7 @@ def _render_js(f: Fetcher, url: str):
 
                 def gate(route):
                     req = route.request
-                    if req.resource_type in ("image", "media", "font") or f.check_url(req.url):
+                    if req.resource_type in ("image", "media", "font", "stylesheet") or f.check_url(req.url):
                         return route.abort()
                     return route.continue_()
 
@@ -262,7 +307,10 @@ def _render_js(f: Fetcher, url: str):
                     page.wait_for_load_state("networkidle", timeout=int(trace.clamp(6, 1) * 1000))
                 except Exception:
                     pass
-                html = page.content()
+                try:
+                    html = page.evaluate(_FLATTEN_SHADOW)
+                except Exception:
+                    html = page.content()
                 try:                                   # let pending request handlers finish quietly
                     page.unroute_all(behavior="ignoreErrors")
                 except Exception:
@@ -270,8 +318,11 @@ def _render_js(f: Fetcher, url: str):
                 return html
             finally:
                 browser.close()
-    except Exception:
+    except Exception as e:
+        trace.event("render", url=url, error=f"browser failed: {type(e).__name__}: {str(e).splitlines()[0][:200]}")
         return None
+    finally:
+        slots.release()
 
 
 # ------------------------------------------------------------------ public
@@ -316,8 +367,8 @@ def _read(f: Fetcher, url: str, *, query: str = "", max_tokens: int = 6000, offs
                 and trace.remaining(99) > 10:
             t0 = time.monotonic()
             html = _render_js(f, r.final_url or url)
-            trace.event("render", url=url, ms=int((time.monotonic() - t0) * 1000),
-                        error="" if html else "browser rendering failed or is not installed")
+            if html:                              # failures are logged by _render_js with the reason
+                trace.event("render", url=url, ms=int((time.monotonic() - t0) * 1000))
             if html:
                 rendered = extract_html(html, r.final_url or url, mode, links, images)
                 if len(rendered.get("markdown", "")) > len(data.get("markdown", "")):
@@ -344,8 +395,10 @@ def _read(f: Fetcher, url: str, *, query: str = "", max_tokens: int = 6000, offs
     page.markdown = data.get("markdown", "")
     if not page.markdown.strip() or data.get("empty"):
         page.markdown = ""
+        js = _JS_HINT.search(r.text)
         page.error = "page has no readable text" + (
-            " (it is built by JavaScript: install Playwright to render it)" if _JS_HINT.search(r.text) else "")
+            "" if not js else " (it is built by JavaScript and the browser could not render it: the log says why)"
+            if browser_available() and render != "never" else " (it is built by JavaScript: install Playwright to render it)")
         return page
     if query and not offset:
         page.content, page.matched = focus(page.markdown, query, max_tokens)
