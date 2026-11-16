@@ -203,6 +203,9 @@ def serve_http(host: str = "127.0.0.1", port: int = 8765, token: str = "", serve
                 web = engines_for(server.fetcher, "web")
                 info["web_engines"] = web
                 info["web_fallbacks"] = [] if cfg.engines else [e for e in BACKUP["web"] if e not in web]
+                from .page import browser_available
+                info["browser"] = ("off (OPENRESEARCH_RENDER=never)" if cfg.render == "never" else
+                                   "installed" if browser_available() else "not installed")
                 info["search_keys"] = [k for k, v in (("tavily", cfg.tavily_api_key), ("brave", cfg.brave_api_key),
                                                       ("searxng", cfg.searxng_url)) if v]
                 return self._send(200, json.dumps(info).encode())
