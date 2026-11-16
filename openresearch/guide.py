@@ -161,8 +161,10 @@ failed, which pages could not be read and why, and suggestions. `log` with `stat
 - **Old information**: add `time`, put the year in the query, and check each source's date.
 - **An engine keeps failing**: the call note and `log` say which; the others still run. A keyed engine
   (Tavily, Brave) on the server makes search dependable.
-- **Empty page or "loading"**: `fetch` with `render: true` (if the server has a browser), or look for
-  the same content elsewhere.
+- **Empty page, "loading", or "built by JavaScript"**: `fetch` the same URL with `render: true`. It opens
+  a browser, which takes 10-45s the first time; the page is then remembered for 6 hours, so asking again is
+  instant. Nothing is rendered unless you ask, so other pages are never slowed down. Or look for the same
+  content elsewhere.
 """
 
 

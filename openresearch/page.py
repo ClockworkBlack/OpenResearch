@@ -19,6 +19,7 @@ from .fetch import Fetcher, Response
 from .rank import est_tokens, focus, truncate
 
 _OUT_OF_TIME = "skipped: this call's time limit was reached first"
+_RENDER_TTL = 6 * 3600                # a rendered page is remembered this long: asking again is instant
 _BLOCKED = frozenset((401, 403, 404, 406, 410, 429, 451, 500, 502, 503, 504))
 _JS_HINT = re.compile(r'id=["\'](?:root|app|__next|__nuxt)["\']|ng-app|enable javascript|requires javascript|'
                       r'__NEXT_DATA__|data-reactroot', re.I)
@@ -39,6 +40,7 @@ class Page:
     lang: str = ""
     content_type: str = ""
     via: str = "live"
+    rendered_at: float = 0.0     # when the browser rendered it (earlier than now if the render was remembered)
     snapshot: str = ""           # Wayback timestamp when via == 'wayback'
     markdown: str = ""           # full extracted document
     content: str = ""            # what to show: focused / truncated slice of markdown
@@ -67,7 +69,8 @@ class Page:
         if self.via == "wayback":
             meta.append(f"Internet Archive copy from {self.snapshot[:8]} (live page unavailable)")
         elif self.via == "rendered":
-            meta.append("JavaScript-rendered")
+            age = int((time.time() - self.rendered_at) / 60) if self.rendered_at else 0
+            meta.append("JavaScript-rendered" + (f", saved copy from {age} min ago" if age >= 1 else ""))
         elif self.via == "cache":
             meta.append(f"cached {int((time.time() - self.fetched_at) / 60)} min ago")
         meta.append(f"~{est_tokens(self.markdown)} tokens total")
@@ -247,6 +250,16 @@ _FLATTEN_SHADOW = """() => {
   flatten(document);
   return '<!doctype html>' + document.documentElement.outerHTML;
 }"""
+# How much text the page shows, shadow DOM included: used to wait until a page has finished filling in.
+_TEXT_LENGTH = """() => {
+  let n = 0;
+  const walk = (root) => {
+    root.querySelectorAll('*').forEach((el) => { if (el.shadowRoot) { n += el.shadowRoot.textContent.length; walk(el.shadowRoot); } });
+  };
+  n += (document.body ? document.body.innerText.length : 0);
+  walk(document);
+  return n;
+}"""
 # Chromium settings for a small container: one renderer, a capped JS heap, nothing it does not need.
 _BROWSER_ARGS = ["--disable-dev-shm-usage", "--disable-gpu", "--no-first-run", "--no-zygote",
                  "--renderer-process-limit=1", "--disable-extensions", "--disable-background-networking",
@@ -307,6 +320,20 @@ def _render_js(f: Fetcher, url: str):
                     page.wait_for_load_state("networkidle", timeout=int(trace.clamp(6, 1) * 1000))
                 except Exception:
                     pass
+                # On a slow host, scripts keep filling the page in after the network goes quiet: wait
+                # until the amount of text stops growing (at most ~10s, and within the call's time limit).
+                settle_until = time.monotonic() + trace.clamp(10, 1)
+                last, steady = -1, 0
+                while time.monotonic() < settle_until:
+                    try:
+                        n = page.evaluate(_TEXT_LENGTH)
+                    except Exception:
+                        break
+                    steady = steady + 1 if n == last and n > 500 else 0
+                    if steady >= 2:
+                        break
+                    last = n
+                    page.wait_for_timeout(600)
                 try:
                     html = page.evaluate(_FLATTEN_SHADOW)
                 except Exception:
@@ -356,6 +383,7 @@ def _read(f: Fetcher, url: str, *, query: str = "", max_tokens: int = 6000, offs
     page = Page(url=url, final_url=r.final_url or r.url, status=r.status, via=r.via,
                 content_type=r.content_type, fetched_at=r.fetched_at)
     data = None
+    rendered_once, wanted = False, False
     if r.ok and trace.expired():              # no time left to parse it: say so instead of running over
         page.error = _OUT_OF_TIME
         return page
@@ -363,16 +391,27 @@ def _read(f: Fetcher, url: str, *, query: str = "", max_tokens: int = 6000, offs
         data = _convert(r, mode, links, images)
         thin = len(data.get("markdown", "")) < 400
         is_html = "links" in data
-        if is_html and render != "never" and (render == "always" or (thin and _JS_HINT.search(r.text))) \
-                and trace.remaining(99) > 10:
+        wanted = render == "always" or (render == "auto" and thin and bool(_JS_HINT.search(r.text)))
+        html, key = None, "rendered:" + (r.final_url or url)
+        if is_html and wanted and max_age != 0:    # rendered before: use that copy, no browser, no wait
+            saved = f.cache.get(key)
+            if saved is not None and time.time() - saved.fetched_at <= _RENDER_TTL:
+                html, page.rendered_at = saved.text, saved.fetched_at
+                trace.event("render", url=url, cached=True, chars=len(html))
+        if is_html and wanted and html is None and trace.remaining(99) > 10:
             t0 = time.monotonic()
             html = _render_js(f, r.final_url or url)
+            rendered_once = True
             if html:                              # failures are logged by _render_js with the reason
-                trace.event("render", url=url, ms=int((time.monotonic() - t0) * 1000))
-            if html:
-                rendered = extract_html(html, r.final_url or url, mode, links, images)
-                if len(rendered.get("markdown", "")) > len(data.get("markdown", "")):
-                    data, page.via = rendered, "rendered"
+                page.rendered_at = time.time()
+                trace.event("render", url=url, ms=int((time.monotonic() - t0) * 1000), chars=len(html))
+                f.cache.put(key, Response(url=key, final_url=r.final_url or url, status=200,
+                                          headers={"content-type": "text/html; charset=utf-8"},
+                                          body=html.encode("utf-8"), fetched_at=page.rendered_at))
+        if html:                                  # freshly rendered or remembered
+            rendered = extract_html(html, r.final_url or url, mode, links, images)
+            if len(rendered.get("markdown", "")) > len(data.get("markdown", "")):
+                data, page.via = rendered, "rendered"
     elif (fallback and r.status in _BLOCKED and "robots.txt" not in r.error and "private-network" not in r.error
           and trace.remaining(99) > 6):
         wr, ts = _wayback(f, url)
@@ -396,9 +435,18 @@ def _read(f: Fetcher, url: str, *, query: str = "", max_tokens: int = 6000, offs
     if not page.markdown.strip() or data.get("empty"):
         page.markdown = ""
         js = _JS_HINT.search(r.text)
-        page.error = "page has no readable text" + (
-            "" if not js else " (it is built by JavaScript and the browser could not render it: the log says why)"
-            if browser_available() and render != "never" else " (it is built by JavaScript: install Playwright to render it)")
+        if page.via == "rendered" or rendered_once:
+            why = " (the browser loaded it, but no article text appeared: the site may need longer, or hide its text from automated readers)"
+        elif js and browser_available() and render != "never" and not wanted:
+            why = (" (it is built by JavaScript: ask again with render: true to load it in a browser; that takes "
+                   "10-45s the first time, then the page is remembered for 6 hours)")
+        elif js and browser_available() and render != "never":
+            why = " (it is built by JavaScript and the browser could not render it: the log says why)"
+        elif js:
+            why = " (it is built by JavaScript: install Playwright to render it)"
+        else:
+            why = ""
+        page.error = "page has no readable text" + why
         return page
     if query and not offset:
         page.content, page.matched = focus(page.markdown, query, max_tokens)

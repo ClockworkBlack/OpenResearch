@@ -262,6 +262,31 @@ class TestFetch(Base):
         self.assertFalse(p.ok)
         self.assertIn("JavaScript", p.error)
 
+    def test_browser_only_on_request_and_renders_are_remembered(self):
+        import openresearch.page as P
+        shell = "<html><body><main><h1>Rendered headline</h1><p>" + "Words from the browser. " * 30 + "</p></main></body></html>"
+        self.f.cfg.render = "ask"                                              # the default
+        with mock.patch.object(P, "_render_js", return_value=shell) as browser, \
+                mock.patch.object(P, "browser_available", return_value=True):
+            p = read(self.f, self.base + "/spa")                               # not asked: no browser, no wait
+            self.assertEqual(browser.call_count, 0)
+            self.assertIn("ask again with render: true", p.error)
+            p = read(self.f, self.base + "/spa", render="always")              # asked: rendered once...
+            self.assertEqual((browser.call_count, p.via), (1, "rendered"))
+            self.assertIn("Words from the browser", p.markdown)
+            again = read(self.f, self.base + "/spa", render="always")          # ...then remembered
+            self.assertEqual((browser.call_count, again.via), (1, "rendered"))
+            self.assertIn("Words from the browser", again.markdown)
+            read(self.f, self.base + "/spa", render="always", max_age=0)       # fresh: renders anew
+            self.assertEqual(browser.call_count, 2)
+            self.f.cfg.render = "auto"                                         # auto: empty pages render by themselves
+            self.assertEqual(read(self.f, self.base + "/spa", max_age=0).via, "rendered")
+            self.assertEqual(browser.call_count, 3)
+        import time
+        two_minutes_later = time.time() + 120
+        with mock.patch.object(P.time, "time", return_value=two_minutes_later):
+            self.assertIn("saved copy from", read(self.f, self.base + "/spa", render="always").header())
+
     def test_wayback_fallback(self):
         import openresearch.page as P
         self.f.cfg.wayback_fallback = True

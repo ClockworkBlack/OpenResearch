@@ -88,8 +88,9 @@ TOOLS = [
                         enum=["inline", "none"], default="inline"),
             "fresh": {"type": "boolean", "description": "Bypass the cache.", "default": False},
             "render": {"type": "boolean", "default": False, "description":
-                       "Load the page in a headless browser first (needs Playwright). Use it when a page comes "
-                       "back empty or as a loading placeholder."},
+                       "Load the page in a headless browser. Only when a page came back empty, as a loading "
+                       "placeholder, or with a note that it is built by JavaScript: the first render takes "
+                       "10-45s, then the page is remembered for 6 hours."},
         }},
     },
     {
