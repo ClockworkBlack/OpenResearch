@@ -196,6 +196,10 @@ def serve_http(host: str = "127.0.0.1", port: int = 8765, token: str = "", serve
                                         "off: OPENRESEARCH_LOG_GITHUB_REPO must look like owner/name")
                 else:
                     info["log_copy"] = "off: OPENRESEARCH_LOG_GITHUB_REPO and OPENRESEARCH_LOG_GITHUB_TOKEN are not set"
+                from .search import BACKUP, engines_for
+                web = engines_for(server.fetcher, "web")
+                info["web_engines"] = web
+                info["web_fallbacks"] = [] if cfg.engines else [e for e in BACKUP["web"] if e not in web]
                 info["search_keys"] = [k for k, v in (("tavily", cfg.tavily_api_key), ("brave", cfg.brave_api_key),
                                                       ("searxng", cfg.searxng_url)) if v]
                 return self._send(200, json.dumps(info).encode())

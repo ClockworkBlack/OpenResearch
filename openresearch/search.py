@@ -399,7 +399,11 @@ VERTICALS = {
 
 
 # Started only when the usual engines are slow or return next to nothing (results weighted lower).
-BACKUP = {"web": ["bingnews", "hackernews"], "code": ["hackernews"], "discussions": ["bingnews"]}
+# DuckDuckGo heads the list: with a keyed engine configured it is a fallback, not a default, because it
+# is slow and often throttled from hosting providers. Without one it stays a default (see engines_for).
+BACKUP = {"web": ["ddg", "bingnews", "hackernews"], "news": ["ddg"], "code": ["hackernews"],
+          "discussions": ["bingnews"]}
+KEYED = ("tavily", "brave", "searxng")      # engines with their own key or server: dependable
 
 
 def engines_for(f: Fetcher, vertical: str, engines=None) -> list:
@@ -415,6 +419,8 @@ def engines_for(f: Fetcher, vertical: str, engines=None) -> list:
             names.insert(0, "tavily")
         if f.cfg.searxng_url and "searxng" not in names:
             names.insert(0, "searxng")
+        if not f.cfg.engines and any(k in names for k in KEYED):
+            names = [e for e in names if e != "ddg"]   # demoted to a fallback (BACKUP)
     return names
 
 
