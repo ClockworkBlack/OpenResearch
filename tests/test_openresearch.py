@@ -411,6 +411,42 @@ class TestSearch(Base):
                 S.tavily(self.f, "other widgets", 5, {})
             self.assertIn("401", str(cm.exception))
 
+    def test_ddg_is_a_fallback_once_a_keyed_engine_is_set(self):
+        self.assertEqual(S.engines_for(self.f, "web"), ["ddg", "wikipedia"])     # no key: ddg is still a default
+        self.f.cfg.tavily_api_key = "tvly-good"
+        self.assertEqual(S.engines_for(self.f, "web"), ["tavily", "wikipedia"])
+        self.assertEqual(S.engines_for(self.f, "news"), ["tavily", "bingnews", "hackernews"])
+        self.assertIn("ddg", S.engines_for(self.f, "code"))                      # no keyed engine serves code
+        self.assertEqual(S.engines_for(self.f, "web", ["ddg"]), ["ddg"])         # named by the caller
+        asked = []
+
+        def engine(name, rows):
+            def run(f, q, n, o):
+                asked.append(name)
+                if rows is None:
+                    raise RuntimeError("down")
+                return [S.Result(f"{name} widget {i}", f"https://{name}{i}.example/w", "widget frequency", name)
+                        for i in range(rows)]
+            return run
+
+        old = dict(S.ENGINES)
+        try:
+            S.ENGINES.update(tavily=engine("tavily", 5), wikipedia=engine("wikipedia", 1), ddg=engine("ddg", 3),
+                             bingnews=engine("bingnews", 0), hackernews=engine("hackernews", 0))
+            results, report = search(self.f, "widget frequency")
+            self.assertNotIn("ddg", asked)                                       # enough without it
+            self.assertNotIn("ddg", report)
+            asked.clear()
+            S.ENGINES["tavily"] = engine("tavily", None)                         # Tavily down: ddg steps in
+            results, report = search(self.f, "widget frequency")
+            self.assertIn("ddg", asked)
+            self.assertEqual(report["ddg"], 3)
+            self.assertIn("down", report["tavily"])
+            self.assertTrue(any(r.engines == ["ddg"] for r in results))
+        finally:
+            S.ENGINES.clear()
+            S.ENGINES.update(old)
+
     def test_mojeek_is_opt_in(self):
         self.assertNotIn("mojeek", S.engines_for(self.f, "web"))
         self.assertEqual(S.engines_for(self.f, "web", ["mojeek"]), ["mojeek"])
@@ -1013,6 +1049,8 @@ class TestLog(Base):
             health = json.loads(get("/health")[1])
             self.assertIn("OPENRESEARCH_LOG_GITHUB_TOKEN are not set", health["log_copy"])   # names only, no values
             self.assertEqual(health["search_keys"], [])
+            self.assertEqual((health["web_engines"], health["web_fallbacks"]),
+                             (["ddg", "wikipedia"], ["bingnews", "hackernews"]))
         finally:
             srv.shutdown()
             srv.server_close()

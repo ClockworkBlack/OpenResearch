@@ -196,7 +196,10 @@ Environment variables (or the same keys, lower-case, in `~/.config/openresearch/
 
 ## Search backends
 
-Out of the box, web search uses DuckDuckGo plus Wikipedia, with no keys. DuckDuckGo throttles busy
+Out of the box, web search uses DuckDuckGo plus Wikipedia, with no keys. Once a keyed engine is set up
+(Tavily, Brave or SearXNG), it takes DuckDuckGo's place and DuckDuckGo becomes a fallback: it is only
+asked when the other engines fail or find next to nothing, because it is slow and often throttled from
+hosting providers. `/health` lists the engines in use (`web_engines`) and the fallbacks (`web_fallbacks`). DuckDuckGo throttles busy
 IP addresses (cloud machines and CI especially), so add at least one backup. Every option below is
 picked up automatically and fused with the others; `python -m openresearch doctor` shows which work.
 
@@ -307,7 +310,8 @@ repository and run `python -m openresearch log --stats --dir LogView/openresearc
 **Time limits.** A tool call returns within `OPENRESEARCH_TOOL_TIMEOUT` seconds (default 50) with whatever
 it has, and says what it skipped. No search engine is waited for longer than
 `OPENRESEARCH_ENGINE_TIMEOUT` (default 12): a slow one is reported as timed out, and if the usual
-engines are slow or nearly empty, backup engines (Bing News, Hacker News) fill in. An engine that gives
+engines are slow or nearly empty, backup engines (DuckDuckGo when a keyed engine is set, Bing News,
+Hacker News) fill in. An engine that gives
 no answer twice in a row is left out for three minutes, so later calls do not wait for it again.
 
 ## How it behaves
