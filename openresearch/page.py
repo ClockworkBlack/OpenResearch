@@ -247,6 +247,16 @@ _FLATTEN_SHADOW = """() => {
   flatten(document);
   return '<!doctype html>' + document.documentElement.outerHTML;
 }"""
+# How much text the page shows, shadow DOM included: used to wait until a page has finished filling in.
+_TEXT_LENGTH = """() => {
+  let n = 0;
+  const walk = (root) => {
+    root.querySelectorAll('*').forEach((el) => { if (el.shadowRoot) { n += el.shadowRoot.textContent.length; walk(el.shadowRoot); } });
+  };
+  n += (document.body ? document.body.innerText.length : 0);
+  walk(document);
+  return n;
+}"""
 # Chromium settings for a small container: one renderer, a capped JS heap, nothing it does not need.
 _BROWSER_ARGS = ["--disable-dev-shm-usage", "--disable-gpu", "--no-first-run", "--no-zygote",
                  "--renderer-process-limit=1", "--disable-extensions", "--disable-background-networking",
@@ -307,6 +317,20 @@ def _render_js(f: Fetcher, url: str):
                     page.wait_for_load_state("networkidle", timeout=int(trace.clamp(6, 1) * 1000))
                 except Exception:
                     pass
+                # On a slow host, scripts keep filling the page in after the network goes quiet: wait
+                # until the amount of text stops growing (at most ~10s, and within the call's time limit).
+                settle_until = time.monotonic() + trace.clamp(10, 1)
+                last, steady = -1, 0
+                while time.monotonic() < settle_until:
+                    try:
+                        n = page.evaluate(_TEXT_LENGTH)
+                    except Exception:
+                        break
+                    steady = steady + 1 if n == last and n > 500 else 0
+                    if steady >= 2:
+                        break
+                    last = n
+                    page.wait_for_timeout(600)
                 try:
                     html = page.evaluate(_FLATTEN_SHADOW)
                 except Exception:
@@ -356,6 +380,7 @@ def _read(f: Fetcher, url: str, *, query: str = "", max_tokens: int = 6000, offs
     page = Page(url=url, final_url=r.final_url or r.url, status=r.status, via=r.via,
                 content_type=r.content_type, fetched_at=r.fetched_at)
     data = None
+    rendered_once = False
     if r.ok and trace.expired():              # no time left to parse it: say so instead of running over
         page.error = _OUT_OF_TIME
         return page
@@ -367,8 +392,9 @@ def _read(f: Fetcher, url: str, *, query: str = "", max_tokens: int = 6000, offs
                 and trace.remaining(99) > 10:
             t0 = time.monotonic()
             html = _render_js(f, r.final_url or url)
+            rendered_once = True
             if html:                              # failures are logged by _render_js with the reason
-                trace.event("render", url=url, ms=int((time.monotonic() - t0) * 1000))
+                trace.event("render", url=url, ms=int((time.monotonic() - t0) * 1000), chars=len(html))
             if html:
                 rendered = extract_html(html, r.final_url or url, mode, links, images)
                 if len(rendered.get("markdown", "")) > len(data.get("markdown", "")):
@@ -396,9 +422,15 @@ def _read(f: Fetcher, url: str, *, query: str = "", max_tokens: int = 6000, offs
     if not page.markdown.strip() or data.get("empty"):
         page.markdown = ""
         js = _JS_HINT.search(r.text)
-        page.error = "page has no readable text" + (
-            "" if not js else " (it is built by JavaScript and the browser could not render it: the log says why)"
-            if browser_available() and render != "never" else " (it is built by JavaScript: install Playwright to render it)")
+        if page.via == "rendered" or rendered_once:
+            why = " (the browser loaded it, but no article text appeared: the site may need longer, or hide its text from automated readers)"
+        elif js and browser_available() and render != "never":
+            why = " (it is built by JavaScript and the browser could not render it: the log says why)"
+        elif js:
+            why = " (it is built by JavaScript: install Playwright to render it)"
+        else:
+            why = ""
+        page.error = "page has no readable text" + why
         return page
     if query and not offset:
         page.content, page.matched = focus(page.markdown, query, max_tokens)
