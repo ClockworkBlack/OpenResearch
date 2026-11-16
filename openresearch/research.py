@@ -21,13 +21,20 @@ DEPTH = {
 _OFFICIAL = re.compile(r"\.(gov|mil|edu)(\.[a-z]{2})?$|\.gov\.[a-z]{2}$|\.int$")
 
 
+_STOP = {"what", "which", "who", "whom", "when", "where", "why", "how", "is", "are", "was", "were", "do",
+         "does", "did", "the", "a", "an", "of", "in", "on", "for", "to", "and", "or", "it", "that", "this",
+         "be", "can", "should", "would", "could", "with", "about", "there", "their", "has", "have", "i", "me"}
+
+
+def _keywords(query: str) -> str:
+    """The query as plain keywords: no quotes, operators or filler words."""
+    words = re.findall(r"[\w'-]+", re.sub(r"\b\w+:\S+", " ", query))
+    return " ".join(w for w in words if w.lower() not in _STOP and not w.startswith("-"))
+
+
 def _auto_queries(question: str) -> list:
     """A keyword-only variant catches pages that a long natural-language query misses."""
-    kw = re.findall(r"[\w'-]+", question)
-    stop = {"what", "which", "who", "whom", "when", "where", "why", "how", "is", "are", "was", "were", "do",
-            "does", "did", "the", "a", "an", "of", "in", "on", "for", "to", "and", "or", "it", "that", "this",
-            "be", "can", "should", "would", "could", "with", "about", "there", "their", "has", "have", "i", "me"}
-    short = " ".join(w for w in kw if w.lower() not in stop)
+    short = _keywords(question)
     out = [question]
     if short and short.lower() != question.lower() and len(short.split()) >= 2:
         out.append(short)
@@ -48,11 +55,12 @@ def research(f: Fetcher, question: str, *, queries=None, depth: str = "standard"
     qs = [q for q in (queries if queries is not None else _auto_queries(question)) if q.strip()][:8]
 
     fused, report, snippets = {}, {}, {}
-    if qs:
-        with ThreadPoolExecutor(max_workers=len(qs)) as pool:
+
+    def run_searches(batch: list):
+        with ThreadPoolExecutor(max_workers=len(batch)) as pool:
             runs = list(pool.map(lambda q: search(f, q, d["results"], vertical=vertical, time=time,
                                                   include_domains=include_domains,
-                                                  exclude_domains=exclude_domains, per_domain=2), qs))
+                                                  exclude_domains=exclude_domains, per_domain=2), batch))
         for results, rep in runs:
             for k, v in rep.items():
                 old = report.get(k)
@@ -64,6 +72,18 @@ def research(f: Fetcher, question: str, *, queries=None, depth: str = "standard"
                 key = canonical(r.url)
                 fused.setdefault(key, [r, 0.0])[1] += 1.0 / (30 + rank)
                 snippets[key] = r
+
+    if qs:
+        run_searches(qs)
+        if len({r.domain for r, _ in fused.values()}) < 3:
+            # Too little to work with (long or over-specific queries often return next to nothing):
+            # try again with plain keywords, and with the question itself.
+            have = {q.lower() for q in qs}
+            wider = list(dict.fromkeys(w for w in [_keywords(q) for q in qs] + _auto_queries(question)
+                                       if w and w.lower() not in have))[:4]
+            if wider:
+                run_searches(wider)
+                qs += wider
     ranked = [r for r, _ in sorted(fused.values(), key=lambda x: -x[1])]
     given = list(dict.fromkeys(u for u in (urls or []) if u and u.strip()))
     per, picks, seen = {}, list(given), {canonical(u) for u in given}

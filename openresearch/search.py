@@ -10,6 +10,7 @@ from urllib.parse import parse_qs, quote, unquote, urlencode, urlsplit, urlunspl
 from .dom import parse, select, select_one
 from .fetch import Fetcher
 from .page import domain_of
+from .rank import tokens
 
 _TRACKING = re.compile(r"^(utm_\w+|fbclid|gclid|msclkid|mc_cid|mc_eid|igshid|ref_src|_hsenc|_hsmi|yclid)$")
 _TIME = {"day": "d", "week": "w", "month": "m", "year": "y", "d": "d", "w": "w", "m": "m", "y": "y"}
@@ -55,6 +56,32 @@ def _in_domains(url: str, domains) -> bool:
 
 def _clean(s) -> str:
     return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", s or "")).strip()
+
+
+def _query_terms(query: str) -> set:
+    """The words a result should be about: operators (site:, -word) are not among them."""
+    return set(tokens(re.sub(r"(?:^|\s)-\S+|\b\w+:\S+", " ", query)))
+
+
+def coverage(terms: set, r: "Result") -> float:
+    """Share of the query's words found in a result's title, snippet and URL (1.0 for one-word queries)."""
+    if len(terms) < 2:
+        return 1.0
+    have = set(tokens(f"{r.title} {r.snippet} {re.sub(r'[/_.+%-]+', ' ', r.url)}"))
+    return len(terms & have) / len(terms)
+
+
+def off_topic(query: str, results: list) -> bool:
+    """True when an engine answered a different question, e.g. only the first word of the query (seen
+    with scraped backends). The sign: hardly any result has two of the query's words in it."""
+    terms = _query_terms(query)
+    if len(terms) < 3 or not results or any(ord(c) >= 0x0E00 for c in query):
+        return False                                 # too few words to judge, or a script written without spaces
+    close = sum(1 for r in results if coverage(terms, r) * len(terms) >= 2)
+    return close * 4 < len(results)
+
+
+_OFF_TOPIC = "results did not match the query (the engine answered a different search); other engines are unaffected"
 
 
 # ------------------------------------------------------------------ engines
@@ -121,9 +148,10 @@ def ddg(f: Fetcher, q: str, n: int, o: dict) -> list:
     for mod in ("ddgs", "duckduckgo_search"):      # use the ddgs library when present: it rotates backends
         try:
             DDGS = __import__(mod, fromlist=["DDGS"]).DDGS
-            rows = DDGS().text(q, max_results=n, region=o.get("region") or "wt-wt", timelimit=_TIME.get(o.get("time")))
+            # "wt-wt" (no region) is DuckDuckGo's own code; the library's other backends misread it
+            rows = DDGS().text(q, max_results=n, region=o.get("region") or "us-en", timelimit=_TIME.get(o.get("time")))
             out = [Result(r.get("title", ""), r.get("href", ""), r.get("body", ""), "ddg") for r in rows or []]
-            if out:
+            if out and not off_topic(q, out):
                 return out
         except ImportError:
             continue
@@ -143,6 +171,8 @@ def ddg(f: Fetcher, q: str, n: int, o: dict) -> list:
                 raise RuntimeError("DuckDuckGo is throttling this network (HTTP 202); `pip install ddgs` adds "
                                    "more backends, or configure Brave or SearXNG")
             raise RuntimeError(r.error or r2.error or "no results")
+    if off_topic(q, out):
+        raise RuntimeError(_OFF_TOPIC)
     return out[:n]
 
 
@@ -383,6 +413,7 @@ def search(f: Fetcher, query: str, n: int = 10, *, vertical: str = "web", engine
             return name, [], f"{type(e).__name__}: {e}"[:160]
 
     counts, errors, merged = {}, {}, {}
+    terms = _query_terms(query)
     with ThreadPoolExecutor(max_workers=max(len(jobs), 1)) as pool:
         for name, rows, err in pool.map(run, jobs):
             counts[name] = counts.get(name, 0) + len(rows)
@@ -411,6 +442,7 @@ def search(f: Fetcher, query: str, n: int = 10, *, vertical: str = "web", engine
                     cur.date = cur.date or r.date
                     cur.extra = cur.extra or r.extra
     for r in merged.values():
+        r.score *= 0.4 + 0.6 * coverage(terms, r)    # a result about one word of the query ranks below one about all
         if f.cfg.prefer_domains and _in_domains(r.url, f.cfg.prefer_domains):
             r.score *= 1.5
     report = {name: (counts[name] if counts[name] or name not in errors else errors[name]) for name in counts}

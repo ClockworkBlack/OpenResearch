@@ -47,7 +47,7 @@ anything by description" is also not built in; the calling model does that from 
 Nothing is required beyond Python 3.10+.
 
 ```
-git clone <this repository URL> OpenResearch
+git clone https://github.com/ClockworkBlack/OpenResearch
 cd OpenResearch
 python -m openresearch doctor        # live-checks every engine and feature from your machine
 ```
@@ -94,6 +94,16 @@ A connector needs the server on the public internet, so host it once:
 
 The free plan sleeps after 15 idle minutes, so the first request after a pause can take a minute
 while it wakes; the paid "starter" plan stays awake. Pushes to `main` redeploy automatically.
+
+### Sharing it with colleagues, or with anyone
+
+Each person runs their own copy; a connector URL is a password and is not meant to be passed around.
+Send them this repository. They tap
+**[Deploy to Render](https://render.com/deploy?repo=https://github.com/ClockworkBlack/OpenResearch)**
+and follow the four steps above, which gives them their own server, their own secret and their own
+free-plan allowance. To run it on their own machine instead:
+`pip install "git+https://github.com/ClockworkBlack/OpenResearch"`, then
+`claude mcp add openresearch -- openresearch mcp`.
 
 Without hosting anything, Claude Code cloud sessions on this repository get the server from
 `.mcp.json`, and the `openresearch` skill falls back to `python3 -m openresearch` on the command

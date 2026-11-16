@@ -231,7 +231,8 @@ class TestFetch(Base):
     def test_private_network_guard(self):
         f = Fetcher(Config(cache_dir=self.tmp.name + "3"))
         for url in (self.base + "/article", "http://localhost/x", "http://169.254.169.254/latest/meta-data",
-                    "http://10.0.0.5/", "file:///etc/passwd", "http://[::1]/"):
+                    "http://10.0.0.5/", "file:///etc/passwd", "http://[::1]/", "http://100.64.0.1/",
+                    "http://[::ffff:10.0.0.5]/", "http://[::ffff:169.254.169.254]/"):
             self.assertTrue(f.fetch(url).error, url)
         f.close()
 
@@ -458,6 +459,62 @@ class TestSearch(Base):
         self.assertLess(rank.est_tokens(text), 3200)
 
 
+    def test_results_for_a_different_search_are_caught(self):
+        q = "heat pump cold climate COP field study"
+        junk = [S.Result("Heat (1995 film) - Wikipedia", "https://en.wikipedia.org/wiki/Heat_(1995_film)", "LAPD detective"),
+                S.Result("Miami Heat Scores - ESPN", "https://www.espn.com/nba/team/_/name/mia/miami-heat", "live scores"),
+                S.Result("Heat (1995) - IMDb", "https://www.imdb.com/title/tt0113277/", "Directed by Michael Mann"),
+                S.Result("Heat - Wikipedia", "https://en.wikipedia.org/wiki/Heat", "energy in transfer")]
+        good = [S.Result("Cold climate heat pump field study", "https://nrel.example/report", "measured COP at -15C"),
+                S.Result("Air source heat pump", "https://en.wikipedia.org/wiki/Air_source_heat_pump", "COP in cold weather")]
+        self.assertTrue(S.off_topic(q, junk))
+        self.assertFalse(S.off_topic(q, good))
+        self.assertFalse(S.off_topic(q, good + junk[:2]))
+        self.assertFalse(S.off_topic("heat", junk))                    # too short to judge
+        self.assertFalse(S.off_topic("ヒートポンプ 寒冷地 性能 調査", junk))   # no word boundaries to compare
+        self.assertFalse(S.off_topic("python asyncio site:docs.python.org -tutorial", [
+            S.Result("asyncio", "https://docs.python.org/3/library/asyncio.html", "Python library")]))
+
+        old = dict(S.ENGINES)
+        S.ENGINES.update({"junk": lambda f, q, n, o: list(junk), "good": lambda f, q, n, o: list(good)})
+        try:                                   # the engine listing junk first must not put it on top
+            results, _ = search(self.f, q, 6, engines=["junk", "good"])
+        finally:
+            S.ENGINES.clear()
+            S.ENGINES.update(old)
+        self.assertEqual({r.domain for r in results[:2]}, {"nrel.example", "en.wikipedia.org"})
+        self.assertIn("Air_source", results[1].url + results[0].url)
+
+        fake = mock.Mock()                     # the ddgs library answering for the first word only
+        fake.DDGS.return_value.text.return_value = [{"title": r.title, "href": r.url, "body": r.snippet} for r in junk]
+        with mock.patch.dict(sys.modules, {"ddgs": fake}), \
+                mock.patch.object(self.f, "fetch", return_value=mcp_server.Fetcher.fetch(self.f, "ftp://x")):
+            with self.assertRaises(RuntimeError):
+                S.ddg(self.f, q, 5, {})
+        self.assertEqual(fake.DDGS.return_value.text.call_args.kwargs["region"], "us-en")
+
+    def test_research_widens_a_search_that_found_almost_nothing(self):
+        base, asked = self.base, []
+
+        def picky(f, q, n, o):                 # like a real engine: nothing for a long sentence
+            asked.append(q)
+            if len(q.split()) > 3:
+                return []
+            return [S.Result("Configure", base + "/docs/b", "", "picky"), S.Result("Solar", base + "/article", "", "picky"),
+                    S.Result("Elsewhere", "http://localhost:1/x", "", "picky")]
+        old = dict(S.ENGINES)
+        S.ENGINES["picky"] = picky
+        self.f.cfg.engines = ["picky"]
+        try:
+            out = research(self.f, "what widget frequency should I set", depth="quick",
+                           queries=["what is the right widget frequency to set"])
+        finally:
+            S.ENGINES.clear()
+            S.ENGINES.update(old)
+        self.assertIn("right widget frequency set", asked)             # the same query as plain keywords
+        self.assertIn("42 hertz", out["text"])
+        self.assertIn("| right widget frequency set", out["text"])     # the reply says what was searched
+
     def test_research_replaces_failed_pages(self):
         base, dead = self.base, "http://127.0.0.1:1/gone"
 
@@ -569,6 +626,41 @@ class TestMcp(Base):
         finally:
             srv.shutdown()
             srv.server_close()
+
+
+    def _serve(self, **kw):
+        srv = mcp_server.serve_http("127.0.0.1", 0, kw.pop("token", ""), self.srv)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+        def post(path, method="ping", headers=None, **params):
+            body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).encode()
+            req = urllib.request.Request(f"http://127.0.0.1:{srv.server_port}{path}", data=body,
+                                         headers={"Content-Type": "application/json", **(headers or {})})
+            try:
+                with opener.open(req, timeout=10) as r:
+                    return r.status, json.loads(r.read())
+            except urllib.error.HTTPError as e:
+                e.read()
+                return e.code, None
+        post.port = srv.server_port
+        return post
+
+    def test_web_pages_cannot_drive_a_local_server(self):
+        post = self._serve()                                           # no secret: this machine only
+        self.assertEqual(post("/mcp")[0], 200)
+        self.assertEqual(post("/mcp", headers={"Origin": "https://evil.example"})[0], 403)
+        self.assertEqual(post("/mcp", headers={"Origin": "null"})[0], 403)
+        self.assertEqual(post("/mcp", headers={"Origin": "http://localhost:6274"})[0], 200)
+        self.assertEqual(post("/mcp", headers={"Origin": "http://[::1]:6274"})[0], 200)
+        post = self._serve(token="s3cret")                             # a secret is proof enough
+        self.assertEqual(post("/mcp/s3cret", headers={"Origin": "https://claude.ai"})[0], 200)
+        import socket                                                  # a path that is not ASCII is refused, not a crash
+        with socket.create_connection(("127.0.0.1", post.port), timeout=10) as raw:
+            raw.sendall("POST /mcp/caf\u00e9 HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\n\r\n{}".encode())
+            self.assertIn(b" 404 ", raw.recv(200))
 
 
 class TestCli(Base):
