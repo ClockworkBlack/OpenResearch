@@ -515,6 +515,30 @@ class TestSearch(Base):
         self.assertIn("42 hertz", out["text"])
         self.assertIn("| right widget frequency set", out["text"])     # the reply says what was searched
 
+    def test_widening_skips_engines_that_failed(self):
+        base, calls = self.base, []
+
+        def thin(f, q, n, o):
+            calls.append(("thin", q))
+            return [S.Result("Configure", base + "/docs/b", "", "thin")] if len(q.split()) <= 3 else []
+
+        def hangs(f, q, n, o):
+            calls.append(("hangs", q))
+            raise RuntimeError("timed out")
+        old = dict(S.ENGINES)
+        S.ENGINES.update({"thin": thin, "hangs": hangs})
+        self.f.cfg.engines = ["thin", "hangs"]
+        try:
+            out = research(self.f, "what widget frequency should I set", depth="quick",
+                           queries=["what is the right widget frequency to set"])
+        finally:
+            S.ENGINES.clear()
+            S.ENGINES.update(old)
+        self.assertEqual([q for name, q in calls if name == "hangs"], ["what is the right widget frequency to set"])
+        self.assertIn(("thin", "right widget frequency set"), calls)
+        self.assertIn("hangs FAILED", out["text"])
+        self.assertIn("42 hertz", out["text"])
+
     def test_research_replaces_failed_pages(self):
         base, dead = self.base, "http://127.0.0.1:1/gone"
 

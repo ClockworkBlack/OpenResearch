@@ -56,10 +56,10 @@ def research(f: Fetcher, question: str, *, queries=None, depth: str = "standard"
 
     fused, report, snippets = {}, {}, {}
 
-    def run_searches(batch: list):
+    def run_searches(batch: list, engines=None):
         with ThreadPoolExecutor(max_workers=len(batch)) as pool:
             runs = list(pool.map(lambda q: search(f, q, d["results"], vertical=vertical, time=time,
-                                                  include_domains=include_domains,
+                                                  include_domains=include_domains, engines=engines,
                                                   exclude_domains=exclude_domains, per_domain=2), batch))
         for results, rep in runs:
             for k, v in rep.items():
@@ -81,8 +81,11 @@ def research(f: Fetcher, question: str, *, queries=None, depth: str = "standard"
             have = {q.lower() for q in qs}
             wider = list(dict.fromkeys(w for w in [_keywords(q) for q in qs] + _auto_queries(question)
                                        if w and w.lower() not in have))[:4]
-            if wider:
-                run_searches(wider)
+            # Only engines that answered: asking one that just failed (a throttled engine hangs for a long
+            # time) would double the wait and gain nothing.
+            working = [k for k, v in report.items() if isinstance(v, int)]
+            if wider and working:
+                run_searches(wider, working)
                 qs += wider
     ranked = [r for r, _ in sorted(fused.values(), key=lambda x: -x[1])]
     given = list(dict.fromkeys(u for u in (urls or []) if u and u.strip()))
