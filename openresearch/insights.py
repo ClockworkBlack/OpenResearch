@@ -60,6 +60,8 @@ def summarize(entry: dict) -> dict:
     engines: dict = {}
     for e in events:
         if e["kind"] == "engine" or (e["kind"] == "timeout" and e.get("engine")):
+            if e.get("note") and not e.get("error") and "results" not in e:
+                continue                             # a fallback stopped because it was not needed
             s = engines.setdefault(e["engine"], {"queries": 0, "results": 0, "ms": 0, "failed": 0, "timeouts": 0,
                                                  "skipped": 0})
             if e["kind"] == "timeout":
@@ -126,7 +128,8 @@ def suggest_call(entry: dict, summary: dict | None = None) -> list:
     if s["limit_used_pct"] and s["limit_used_pct"] >= 90:
         tips.append("the call used most of its time limit; a lower depth or fewer queries would leave headroom")
     if s["robots_seconds"] >= max(3.0, 0.2 * s["seconds"]):
-        tips.append(f"{s['robots_seconds']}s went on robots.txt checks for new sites")
+        tips.append(f"robots.txt checks for new sites took {s['robots_seconds']}s, added up across parallel "
+                    "requests")
     blocked = s["page_failures"].get("bot check", 0) + s["page_failures"].get("forbidden", 0)
     if blocked >= 2:
         tips.append(f"{blocked} pages refused automated reading ({', '.join(s['failed_domains'][:4])}); "

@@ -4,7 +4,7 @@ from __future__ import annotations
 import re
 import xml.etree.ElementTree as ET
 import time as _time
-from concurrent.futures import ThreadPoolExecutor, wait
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from urllib.parse import parse_qs, quote, unquote, urlencode, urlsplit, urlunsplit
 
@@ -517,14 +517,34 @@ def search(f: Fetcher, query: str, n: int = 10, *, vertical: str = "web", engine
                 rows, err = fut.result()
                 absorb(name, rows, err, weight)
 
-        collect(min(limit, 4.0) if backups else limit)
+        # keyed engines (Tavily ~3s) get a little longer before the fallbacks are started
+        first_wait = 6.0 if any(n in KEYED for n in names) else 4.0
+        collect(min(limit, first_wait) if backups else limit)
+        primaries = set(pending)                     # main engines still running after the first wait
         if backups and len(merged) < 3:
             for job in plan(backups):
                 pending[pool.submit(trace.bind(run), job)] = (job, 0.6)
-        if pending:
-            collect(limit - (_time.monotonic() - started))
-        for (name, q), _w in pending.values():
+        primaries_done_at, enough = None, False
+        while pending:
+            left = limit - (_time.monotonic() - started)
+            if left <= 0:
+                break
+            if primaries_done_at is None and not (primaries & set(pending)):
+                primaries_done_at = _time.monotonic()
+            if primaries_done_at is not None and len(merged) >= 3 and _time.monotonic() - primaries_done_at >= 1.5:
+                enough = True                        # the main engines delivered: stop waiting for fallbacks
+                break
+            done, _ = wait(list(pending), timeout=min(left, 0.5), return_when=FIRST_COMPLETED)
+            for fut in [x for x in pending if x in done]:
+                (name, _q), weight = pending.pop(fut)
+                health.pop(name, None)
+                rows, err = fut.result()
+                absorb(name, rows, err, weight)
+        for (name, q), weight in pending.values():
             waited = _time.monotonic() - started
+            if enough and weight < 1.0:              # a fallback not needed in the end: neither a failure nor a strike
+                trace.event("engine", engine=name, query=q, note="fallback not needed: the main engines answered")
+                continue
             counts.setdefault(name, 0)
             errors.setdefault(name, f"no answer within {waited:.0f}s (gave up waiting)")
             if waited >= 3:                              # not a call that simply ran out of its own time

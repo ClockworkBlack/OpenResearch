@@ -465,6 +465,41 @@ class TestSearch(Base):
                                               "params": {"name": "guide", "arguments": {"topic": "queries"}}})
         self.assertIn("Keywords, not sentences", r["result"]["content"][0]["text"])
 
+    def test_fallbacks_are_not_waited_for_once_the_main_engines_deliver(self):
+        import time
+
+        def slow_main(f, q, n, o):              # Tavily on a slow day: past the first wait
+            time.sleep(6.5)
+            return [S.Result(f"Widget {i}", f"https://m{i}.example/w", "widget frequency", "tavily") for i in range(4)]
+
+        def hung(f, q, n, o):
+            time.sleep(8)
+            return []
+
+        old = dict(S.ENGINES)
+        self.f.cfg.tavily_api_key = "tvly-x"
+        try:
+            S.ENGINES.update(tavily=slow_main, wikipedia=lambda f, q, n, o: [], ddg=hung,
+                             bingnews=lambda f, q, n, o: [], hackernews=lambda f, q, n, o: [])
+            t0 = time.monotonic()
+            results, report = search(self.f, "widget frequency")
+            took = time.monotonic() - t0
+        finally:
+            S.ENGINES.clear()
+            S.ENGINES.update(old)
+        self.assertLess(took, 9.5)                                               # not the 12s engine limit
+        self.assertEqual(len(results), 4)
+        self.assertNotIn("ddg", report)                                          # not reported as a failure
+        self.assertEqual(self.f.engine_health.get("ddg"), None)                  # and no strike against it
+
+    def test_quick_links_match_the_full_parser(self):
+        from openresearch.extract import links, quick_links
+        html = ("<html><head><base href='/docs/'></head><body><a href='a.html'>A <b>page</b></a>"
+                "<a href=\"b.html#part\" class=x>B</a><a href=c.html>C</a><a href='#top'>top</a>"
+                "<a href='mailto:x@y'>m</a><a href='a.html'>A page, longer text</a>"
+                "<a href='https://other.example/x?a=1&amp;b=2'>O</a></body></html>")
+        self.assertEqual(quick_links(html, "https://s.example/index.html"), links(parse(html), "https://s.example/index.html"))
+
     def test_mojeek_is_opt_in(self):
         self.assertNotIn("mojeek", S.engines_for(self.f, "web"))
         self.assertEqual(S.engines_for(self.f, "web", ["mojeek"]), ["mojeek"])

@@ -336,6 +336,37 @@ def links(root: Node, base_url: str) -> list:
     return list(found.items())
 
 
+_A_TAG = re.compile(r"<a\b([^>]*)>(.*?)</a\s*>", re.I | re.S)
+_HREF = re.compile(r"""\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))""", re.I)
+_BASE = re.compile(r"""<base\b[^>]*\bhref\s*=\s*["']?([^"'\s>]+)""", re.I)
+_TAGS = re.compile(r"<[^>]+>")
+
+
+def quick_links(html: str, base_url: str) -> list:
+    """The same (url, anchor text) pairs as links(), found with a scan instead of a full parse: many
+    times faster on large pages, for callers that only need the links (site maps)."""
+    import html as _html
+    m = _BASE.search(html[:20000])
+    base = urljoin(base_url, m.group(1)) if m else base_url
+    found = {}
+    for attrs, inner in _A_TAG.findall(html):
+        h = _HREF.search(attrs)
+        if not h:
+            continue
+        href = _html.unescape(next(g for g in h.groups() if g is not None)).strip()
+        if not href or href.startswith(("#", "javascript:", "mailto:", "tel:", "data:")):
+            continue
+        try:
+            url = urldefrag(urljoin(base, href))[0]
+        except ValueError:
+            continue
+        if url.startswith(("http://", "https://")):
+            text = re.sub(r"\s+", " ", _html.unescape(_TAGS.sub(" ", inner))).strip()[:120]
+            if url not in found or len(text) > len(found[url]):
+                found[url] = text
+    return list(found.items())
+
+
 def extract_html(html: str, url: str = "", mode: str = "main", link_style: str = "inline",
                  images: bool = False) -> dict:
     """HTML -> {markdown, title, ..., links}. mode: 'main' (article only) or 'full' (whole page)."""

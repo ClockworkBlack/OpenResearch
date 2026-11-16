@@ -121,8 +121,16 @@ def map_site(f: Fetcher, url: str, limit: int = 200, search: str = "", subdomain
     def score(it):
         return _relevance(q, it["url"], it["text"]) if q else 0.0
 
+    def scan(u):
+        """Only the links: no conversion to Markdown, which on a slow host costs seconds per big page."""
+        r = f.fetch(u, timeout=10, retries=0)
+        if not r.ok or "html" not in (r.content_type or "html"):
+            return Page(url=u, error=r.error or "not an HTML page")
+        from .extract import quick_links
+        return Page(url=u, final_url=r.final_url, status=r.status, links=quick_links(r.text, r.final_url or u))
+
     opened = {url}
-    add(read(f, url, max_tokens=50, mode="full", render="never", fallback=False))
+    add(trace.bind(scan)(url))
     while explore > 0 and len(opened) <= explore and trace.remaining(99) > 8:
         exact = sum(1 for it in found.values() if score(it) >= 1.0)  # every query word present
         if (from_sitemap >= 50 and (not q or exact)) or (q and exact >= min(limit, 10)):
@@ -134,9 +142,9 @@ def map_site(f: Fetcher, url: str, limit: int = 200, search: str = "", subdomain
         if not batch:
             break
         opened.update(batch)
-        for page in read_many(f, batch, workers=4, max_tokens=50, mode="full", render="never", fallback=False,
-                              retries=0, timeout=10):
-            add(page)
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            for page in pool.map(trace.bind(scan), batch):
+                add(page)
     items = list(found.values())
     if q:
         items.sort(key=lambda it: (-score(it), urlsplit(it["url"]).path.count("/"), len(it["url"])))

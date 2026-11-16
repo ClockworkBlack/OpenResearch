@@ -196,7 +196,11 @@ def research(f: Fetcher, question: str, *, queries=None, depth: str = "standard"
             head = f" ({c.heading})" if c.heading and not c.text.startswith("#") else ""
             lines.append(f"\n### [{num}]{head}\n{c.text}")
     words = {}                                        # stem -> the word as the caller wrote it
+    filler = {"main", "key", "major", "difference", "differences", "between", "explain", "tell", "give", "list",
+              "overview", "please", "best", "good"}
     for w in re.findall(r"\w+", question):
+        if w.lower() in filler:
+            continue
         for t in tokens(w):
             words.setdefault(t, w.lower())
     covered = set()
