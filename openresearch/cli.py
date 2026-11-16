@@ -164,6 +164,14 @@ def _run(a, f) -> int:
                 srv = mcp_server.serve_http(a.host, a.port, a.token, mcp_server.Server(f))
                 print(f"OpenResearch MCP on http://{a.host}:{a.port}/mcp" + (" (token required)" if a.token else ""),
                       file=sys.stderr)
+                import signal
+
+                def stop(*_):                    # hosts stop a container with SIGTERM: leave through `finally`,
+                    raise KeyboardInterrupt      # so the last log entries are uploaded first
+                try:
+                    signal.signal(signal.SIGTERM, stop)
+                except (ValueError, OSError):
+                    pass
                 srv.serve_forever()
             else:
                 mcp_server.serve_stdio(mcp_server.Server(f))

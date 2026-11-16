@@ -181,6 +181,9 @@ Environment variables (or the same keys, lower-case, in `~/.config/openresearch/
 | `OPENRESEARCH_ENGINE_TIMEOUT` | `12` | Seconds to wait for any one search engine |
 | `OPENRESEARCH_LOG_KEEP` | `300` | How many finished calls the log remembers |
 | `OPENRESEARCH_LOG_STDERR` | `0` | Also print one JSON line per call to stderr |
+| `OPENRESEARCH_LOG_GITHUB_REPO` | | Repository (`owner/name` or URL) that receives a copy of the call log |
+| `OPENRESEARCH_LOG_GITHUB_TOKEN` | | Token allowed to write that repository's contents |
+| `OPENRESEARCH_LOG_GITHUB_DIR` | `openresearch` | Folder in that repository |
 | `OPENRESEARCH_CACHE_TTL` | `3600` | Seconds a cached page stays fresh |
 | `OPENRESEARCH_CACHE_DIR` | `~/.cache/openresearch` | Cache location |
 | `OPENRESEARCH_RESPECT_ROBOTS` | `1` | Obey `robots.txt` |
@@ -253,12 +256,28 @@ Timeline (seconds from start; ! = problem):
 ```
 
 The log keeps the last 300 calls in `log.db` beside the page cache. On a host with a temporary disk
-(Render's free plan) it starts empty after each restart.
+(Render's free plan) it starts empty after each restart, so keep a copy on GitHub:
+
+**Keeping the log on GitHub.** Give the server a repository and a token, and each finished call is also
+written there about 15 seconds later (calls close together share one file), as
+`openresearch/<date>/<time>-<tool>-<call id>.md`: the readable timeline, with the raw JSON underneath.
+Whatever is still waiting is sent when the server shuts down.
+
+1. Use a **private** repository: the log contains your questions and the pages read.
+2. On GitHub: Settings, Developer settings, Personal access tokens, Fine-grained tokens, Generate new
+   token. Repository access: *Only select repositories*, the log repository. Permissions:
+   *Contents: Read and write*. Nothing else.
+3. On the server set `OPENRESEARCH_LOG_GITHUB_REPO` (for example `yourname/LogView`) and
+   `OPENRESEARCH_LOG_GITHUB_TOKEN` (the token). On Render: the service's **Environment** tab.
+
+`log` then ends with a line such as `Copy on GitHub - yourname/LogView/openresearch: 12 call(s) saved`,
+or the reason an upload failed. A failed upload never affects a tool call; it is retried with the next one.
 
 **Time limits.** A tool call returns within `OPENRESEARCH_TOOL_TIMEOUT` seconds (default 50) with whatever
 it has, and says what it skipped. No search engine is waited for longer than
 `OPENRESEARCH_ENGINE_TIMEOUT` (default 12): a slow one is reported as timed out, and if the usual
-engines are slow or nearly empty, backup engines (Bing News, Hacker News) fill in.
+engines are slow or nearly empty, backup engines (Bing News, Hacker News) fill in. An engine that gives
+no answer twice in a row is left out for three minutes, so later calls do not wait for it again.
 
 ## How it behaves
 

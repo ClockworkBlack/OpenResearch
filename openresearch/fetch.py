@@ -191,7 +191,13 @@ class Fetcher:
     def __init__(self, config: Config | None = None):
         self.cfg = config or Config.load()
         self.cache = Cache(self.cfg.cache_dir)
-        self.log = trace.Log(self.cfg.cache_dir, self.cfg.log_keep, self.cfg.log_stderr)
+        shipper = None
+        if self.cfg.log_github_repo and self.cfg.log_github_token:
+            from .logship import GitHubLogShipper
+            shipper = GitHubLogShipper(self.cfg.log_github_repo, self.cfg.log_github_token, self.cfg.log_github_dir,
+                                       self.cfg.log_github_api, render=trace.format_entry)
+        self.log = trace.Log(self.cfg.cache_dir, self.cfg.log_keep, self.cfg.log_stderr, shipper)
+        self.engine_health: dict = {}        # engine -> [timeouts in a row, skip until (monotonic)]
         self._opener = urllib.request.build_opener(
             _NoRedirect(), urllib.request.HTTPSHandler(context=ssl.create_default_context()))
         self._lock = threading.Lock()

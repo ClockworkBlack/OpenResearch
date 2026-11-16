@@ -463,14 +463,26 @@ def search(f: Fetcher, query: str, n: int = 10, *, vertical: str = "web", engine
     limit = trace.clamp(f.cfg.engine_timeout or 12.0)
     backups = [] if (engines or f.cfg.engines) else [e for e in BACKUP.get(vertical, []) if e not in names]
     started = _time.monotonic()
+    health = getattr(f, "engine_health", {})
+    if not engines:
+        # An engine that gave no answer twice running is left out for a few minutes, so that every
+        # call does not wait the full time limit for it again. Engines named by the caller always run.
+        resting = [e for e in names if health.get(e, [0, 0])[1] > started]
+        if resting and (len(resting) < len(names) or backups):
+            for name in resting:
+                msg = f"skipped: no answer the last 2 times, trying again in {health[name][1] - started:.0f}s"
+                counts[name], errors[name] = 0, msg
+                trace.event("engine", engine=name, query=query, error=msg)
+            names = [e for e in names if e not in resting]
     pool = ThreadPoolExecutor(max_workers=8)
     try:
         pending = {pool.submit(trace.bind(run), job): (job, 1.0) for job in plan(names)}
 
         def collect(timeout):
             done, _ = wait(list(pending), timeout=max(timeout, 0))
-            for fut in done:
+            for fut in [x for x in pending if x in done]:      # in the order asked, not the order answered
                 (name, _q), weight = pending.pop(fut)
+                health.pop(name, None)
                 rows, err = fut.result()
                 absorb(name, rows, err, weight)
 
@@ -484,10 +496,16 @@ def search(f: Fetcher, query: str, n: int = 10, *, vertical: str = "web", engine
             waited = _time.monotonic() - started
             counts.setdefault(name, 0)
             errors.setdefault(name, f"no answer within {waited:.0f}s (gave up waiting)")
+            if waited >= 3:                              # not a call that simply ran out of its own time
+                strikes = health.get(name, [0, 0])[0] + 1
+                health[name] = [strikes, _time.monotonic() + 180 if strikes >= 2 else 0]
             trace.event("timeout", engine=name, query=q, ms=int(waited * 1000),
                         error=f"no answer within {waited:.0f}s (gave up waiting)")
     finally:
         pool.shutdown(wait=False, cancel_futures=True)
+    order = {name: i for i, name in enumerate(names + backups)}
+    for r in merged.values():                        # same listing whichever engine happened to answer first
+        r.engines.sort(key=lambda e: order.get(e, 99))
     for r in merged.values():
         r.score *= 0.4 + 0.6 * coverage(terms, r)    # a result about one word of the query ranks below one about all
         if f.cfg.prefer_domains and _in_domains(r.url, f.cfg.prefer_domains):

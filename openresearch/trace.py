@@ -175,8 +175,9 @@ class active:
 class Log:
     """The last `keep` finished calls, in SQLite beside the page cache (in memory if that fails)."""
 
-    def __init__(self, directory: str, keep: int = 300, stderr: bool = False):
+    def __init__(self, directory: str, keep: int = 300, stderr: bool = False, shipper=None):
         self.keep, self.stderr = max(int(keep), 1), stderr
+        self.shipper = shipper               # optional off-machine copy (see logship.py)
         self._lock = threading.Lock()
         self._mem: deque = deque(maxlen=self.keep)
         self._db = None
@@ -200,6 +201,8 @@ class Log:
                 print("openresearch " + json.dumps(line, ensure_ascii=False, default=str), file=sys.stderr, flush=True)
             except (OSError, ValueError):
                 pass
+        if self.shipper is not None:
+            self.shipper.add(entry)
         with self._lock:
             self._mem.append(entry)
             if self._db is None:
@@ -251,6 +254,8 @@ class Log:
                     pass
 
     def close(self):
+        if self.shipper is not None:
+            self.shipper.flush()             # do not lose the last calls when the server stops
         with self._lock:
             if self._db is not None:
                 self._db.close()

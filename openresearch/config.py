@@ -40,6 +40,10 @@ class Config:
     engine_timeout: float = 12.0     # seconds to wait for any one search engine
     log_keep: int = 300              # how many finished calls the log remembers
     log_stderr: bool = False         # also print one JSON line per call to stderr (for hosted logs)
+    log_github_repo: str = ""        # owner/name (or URL) of a repository to copy the call log into
+    log_github_token: str = ""       # a token that may write to that repository's contents
+    log_github_dir: str = "openresearch"
+    log_github_api: str = "https://api.github.com"
 
     @classmethod
     def load(cls, path: str | None = None) -> "Config":

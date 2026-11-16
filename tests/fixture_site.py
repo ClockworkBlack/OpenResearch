@@ -88,6 +88,7 @@ def _pdf(text: str) -> bytes:
 class Site:
     def __init__(self):
         self.hits = {}
+        self.puts = []
         site = self
 
         class H(BaseHTTPRequestHandler):
@@ -103,6 +104,14 @@ class Site:
                     self.send_header(k, v)
                 self.end_headers()
                 self.wfile.write(body)
+
+            def do_PUT(self):                     # stands in for GitHub's "create a file" API
+                import json
+                body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
+                site.puts.append((self.path, self.headers.get("Authorization", ""), body))
+                if "denied" in self.path:
+                    return self._send(403, "{}", "application/json")
+                self._send(201, "{}", "application/json")
 
             def do_GET(self):
                 path = self.path.split("?")[0]

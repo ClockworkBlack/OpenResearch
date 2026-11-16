@@ -10,6 +10,7 @@ Optional ones (`ddgs`, `pypdf`, `playwright`, `brotli`) must be imported lazily 
 - `search.py` engines + rank fusion; `rank.py` chunking and BM25; `research.py` the one-call pipeline
 - `crawl.py` map and crawl; `structured.py` selector/table/JSON-LD extraction
 - `tools.py` the tool schemas (six web tools plus `log`) and dispatcher, shared by `mcp_server.py` and `cli.py`
+- `logship.py` copies finished log entries to a GitHub repository (optional, off by default)
 - `trace.py` per-call log and time limit: `trace.event(...)` records a step, `trace.remaining()` is the time left
 
 ## Rules

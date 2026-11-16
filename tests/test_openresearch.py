@@ -762,6 +762,81 @@ class TestLog(Base):
         entry = self.f.log.recent(1)[0]
         self.assertTrue(any(e["kind"] == "timeout" for e in entry["events"]))
 
+    def test_log_is_copied_to_github(self):
+        import base64
+        from openresearch.logship import GitHubLogShipper, repo_name
+        self.assertEqual(repo_name("https://github.com/ClockworkBlack/LogView.git"), "ClockworkBlack/LogView")
+        self.assertEqual(repo_name("ClockworkBlack/LogView"), "ClockworkBlack/LogView")
+        self.assertEqual(repo_name("not a repo"), "")
+        cfg = Config(cache_dir=self.tmp.name + "/gh", allow_private=True, min_delay=0, wayback_fallback=False,
+                     render="never", log_github_repo="https://github.com/me/LogView.git", log_github_token="tok",
+                     log_github_api=self.base)
+        f = Fetcher(cfg)
+        self.site.puts.clear()
+        call(f, "fetch", {"urls": [self.base + "/article"]})
+        call(f, "fetch", {"urls": [self.base + "/missing"]})
+        self.assertEqual(self.site.puts, [])                              # batched: nothing sent yet
+        self.assertIn("2 waiting", call(f, "log", {}))
+        f.close()                                                         # shutting down sends what is waiting
+        (path, auth, body), = self.site.puts
+        self.assertRegex(path, r"^/repos/me/LogView/contents/openresearch/\d{4}-\d\d-\d\d/\d{6}-fetch-\w{8}-and-1-more\.md$")
+        self.assertEqual(auth, "Bearer tok")
+        text = base64.b64decode(body["content"]).decode()
+        self.assertIn("/article -> read", text)
+        self.assertIn("/missing -> FAILED - HTTP 404", text)
+        self.assertIn("1 problem(s)", body["message"])
+
+        entry = {"id": "abcd1234", "tool": "search", "status": "ok", "duration": 1.0, "problems": 0,
+                 "started": 1_800_000_000.0, "args": {"query": "q"}, "events": []}
+        down = GitHubLogShipper("me/LogView", "tok", api="http://127.0.0.1:1", delay=60)
+        down.add(entry)
+        self.assertFalse(down.flush())                                    # GitHub unreachable: the call is kept
+        self.assertIn("1 waiting", down.status())
+        self.assertIn("could not reach GitHub", down.status())
+        down.api = self.base
+        self.assertTrue(down.flush())
+        self.assertIn("1 call(s) saved", down.status())
+        denied = GitHubLogShipper("me/denied", "tok", api=self.base, delay=60)
+        denied.add(entry)
+        denied.flush()
+        self.assertIn("may not write", denied.status())
+        off = GitHubLogShipper("me/LogView", "", api=self.base)
+        off.add(entry)
+        self.assertEqual(off.status(), "off")
+
+    def test_engine_that_keeps_hanging_is_rested(self):
+        import time
+        calls = []
+
+        def fast(f, q, n, o):
+            return [S.Result("Widget guide", "https://a.example/widgets", "widget frequency", "fast")]
+
+        def hung(f, q, n, o):
+            calls.append(q)
+            time.sleep(3.6)
+            return []
+
+        old, old_web = dict(S.ENGINES), S.VERTICALS["web"]
+        S.ENGINES.update(fast=fast, hung=hung)
+        S.VERTICALS["web"] = ["fast", "hung"]
+        self.f.cfg.engine_timeout = 3.1
+        try:
+          with mock.patch.dict(S.BACKUP, {}, clear=True):                 # keep the test offline
+              search(self.f, "widget frequency")
+              search(self.f, "widget frequency")                          # second time-out in a row
+              t0 = time.monotonic()
+              results, report = search(self.f, "widget frequency")          # third call: not asked, not waited for
+              self.assertLess(time.monotonic() - t0, 1)
+              self.assertEqual(len(calls), 2)
+              self.assertIn("skipped: no answer the last 2 times", report["hung"])
+              self.assertEqual(len(results), 1)
+              search(self.f, "widget frequency", engines=["hung", "fast"])  # named by the caller: always asked
+              self.assertEqual(len(calls), 3)
+        finally:
+            S.ENGINES.clear()
+            S.ENGINES.update(old)
+            S.VERTICALS["web"] = old_web
+
     def test_long_rate_limit_wait_is_skipped_not_slept(self):
         import time
         from urllib.parse import urlsplit

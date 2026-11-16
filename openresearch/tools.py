@@ -170,7 +170,10 @@ def show_log(f: Fetcher, a: dict) -> str:
         if entry is None:
             return f"No call with id {a['id']} in the log (it keeps the last {f.log.keep} calls)."
         return trace.format_entry(entry, problems_only=only)
-    return trace.format_list(f.log.recent(int(a.get("n", 10)), problems_only=only))
+    text = trace.format_list(f.log.recent(int(a.get("n", 10)), problems_only=only))
+    if f.log.shipper is not None:
+        text += "\nCopy on GitHub - " + f.log.shipper.status()
+    return text
 
 
 def call(f: Fetcher, name: str, a: dict) -> str:

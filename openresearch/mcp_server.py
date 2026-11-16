@@ -183,7 +183,11 @@ def serve_http(host: str = "127.0.0.1", port: int = 8765, token: str = "", serve
             self._body()
             path, _, query = self.path.partition("?")
             if path == "/health":
-                return self._send(200, json.dumps({"ok": True, "version": VERSION}).encode())
+                info = {"ok": True, "version": VERSION}
+                shipper = server.fetcher.log.shipper
+                if shipper is not None:          # no repository name here: this page needs no token
+                    info["log_copy"] = "error" if shipper.last_error else "on"
+                return self._send(200, json.dumps(info).encode())
             if path == "/log" or path.startswith("/log/"):   # the call log as a plain-text page
                 if not self._authorized() or (not token and self._foreign_origin()):
                     return self._send(404, b'{"error":"not found: the log is at /log/<your OPENRESEARCH_TOKEN>"}')
