@@ -222,7 +222,8 @@ class Fetcher:
             except (OSError, ValueError):
                 addrs = []          # cannot resolve here (e.g. a proxy resolves names): let the request decide
         for a in addrs:
-            if a.is_private or a.is_loopback or a.is_link_local or a.is_reserved or a.is_multicast or a.is_unspecified:
+            a = getattr(a, "ipv4_mapped", None) or a     # ::ffff:10.0.0.5 is 10.0.0.5
+            if not a.is_global or a.is_multicast:        # also covers carrier-grade NAT (100.64.0.0/10)
                 return "private-network address blocked (set OPENRESEARCH_ALLOW_PRIVATE=1 to allow)"
         return ""
 

@@ -123,7 +123,19 @@ def serve_http(host: str = "127.0.0.1", port: int = 8765, token: str = "", serve
                 return True
             path = self.path.split("?")[0].rstrip("/")
             bearer = self.headers.get("Authorization", "").removeprefix("Bearer ").strip()
-            return hmac.compare_digest(bearer, token) or hmac.compare_digest(path, "/mcp/" + token)
+            want = token.encode("utf-8")                 # bytes: compare_digest raises on non-ASCII text
+            return (hmac.compare_digest(bearer.encode("utf-8", "replace"), want)
+                    or hmac.compare_digest(path.encode("utf-8", "replace"), b"/mcp/" + want))
+
+        def _foreign_origin(self) -> bool:
+            """True for a request sent by a web page on another site. Browsers add Origin; MCP clients do
+            not. Without this, any page open in a browser could drive a server on localhost."""
+            origin = self.headers.get("Origin", "")
+            if not origin:
+                return False
+            host = origin.split("://", 1)[-1].rsplit("@", 1)[-1]
+            host = host[1:].split("]")[0] if host.startswith("[") else host.split(":")[0]
+            return host.lower() not in ("localhost", "127.0.0.1", "::1")
 
         def do_GET(self):
             self._body()
@@ -158,6 +170,8 @@ def serve_http(host: str = "127.0.0.1", port: int = 8765, token: str = "", serve
             if not self._authorized():
                 # 404, not 401: a 401 makes MCP clients start an OAuth sign-in this server does not offer.
                 return self._send(404, b'{"error":"not found: the connector URL must end in /mcp/<your OPENRESEARCH_TOKEN>"}')
+            if not token and self._foreign_origin():     # with a token, the token is proof enough
+                return self._send(403, b'{"error":"requests from web pages are not accepted"}')
             try:
                 msg = json.loads(raw or b"null")
             except ValueError:
