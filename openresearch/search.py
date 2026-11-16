@@ -160,11 +160,13 @@ def ddg(f: Fetcher, q: str, n: int, o: dict) -> list:
     params = {"q": q, "kl": o.get("region") or "wt-wt"}
     if _TIME.get(o.get("time")):
         params["df"] = _TIME[o["time"]]
+    # A throttled DuckDuckGo hangs rather than refusing: bound the wait so one engine cannot hold up the rest.
     r = f.fetch("https://html.duckduckgo.com/html/?" + urlencode(params), robots=False, max_age=_SEARCH_TTL,
-                headers={"Referer": "https://html.duckduckgo.com/"})
+                headers={"Referer": "https://html.duckduckgo.com/"}, timeout=12, retries=1)
     out = parse_ddg_html(r.text) if r.ok else []
     if not out:
-        r2 = f.fetch("https://lite.duckduckgo.com/lite/?" + urlencode(params), robots=False, max_age=_SEARCH_TTL)
+        r2 = f.fetch("https://lite.duckduckgo.com/lite/?" + urlencode(params), robots=False, max_age=_SEARCH_TTL,
+                     timeout=12, retries=1)
         out = parse_ddg_lite(r2.text) if r2.ok else []
         if not out and not r.ok and not r2.ok:
             if 202 in (r.status, r2.status):
