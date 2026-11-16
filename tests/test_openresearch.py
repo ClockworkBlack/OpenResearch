@@ -855,6 +855,98 @@ class TestLog(Base):
             S.ENGINES.update(old)
             S.VERTICALS["web"] = old_web
 
+    def test_research_entry_measures_its_work(self):
+        def one(f, q, n, o):
+            return [S.Result("Configure", self.base + "/docs/b", "widget frequency 42 hertz", "one"),
+                    S.Result("Gone", self.base.replace("127.0.0.1", "localhost") + "/missing",
+                             "widget frequency page", "one")]
+
+        def two(f, q, n, o):
+            return [S.Result("Configure", self.base + "/docs/b", "widget frequency", "two"),
+                    S.Result("Cats", self.base + "/blog/cats", "widget cats", "two")]
+
+        old = dict(S.ENGINES)
+        S.ENGINES.update(one=one, two=two)
+        self.f.cfg.engines = ["one", "two"]
+        try:
+            call(self.f, "research", {"question": "widget frequency setting", "queries": ["widget frequency"],
+                                      "depth": "quick"})
+        finally:
+            S.ENGINES.clear()
+            S.ENGINES.update(old)
+        e = self.f.log.recent(1)[0]
+        s = e["summary"]
+        # two sites only, so research widens its search (one more query) before reading
+        self.assertEqual((s["queries"], s["candidates"], s["widened"]), (2, 3, True))
+        self.assertGreaterEqual(s["sources"], 1)
+        self.assertGreaterEqual(s["source_engines"].get("one", 0), 1)          # credit goes to the engines that
+        self.assertGreaterEqual(s["source_engines"].get("two", 0), 1)          # found the pages used
+        self.assertEqual(s["engines"]["one"]["results"], 4)                     # 2 results x 2 queries
+        self.assertEqual(s["page_failures"], {"not found": 1})
+        self.assertEqual(s["failed_sites"], [{"domain": "localhost", "why": "not found"}])
+        self.assertIn("search_seconds", s)
+        self.assertEqual(e["env"]["version"], __import__("openresearch").__version__)
+        text = call(self.f, "log", {"id": e["id"]})
+        self.assertIn("Summary:", text)
+        self.assertIn("Engine one: 4 results from 2 queries", text)
+        self.assertIn("Research: 2 queries (widened), 3 results", text)
+
+    def test_stats_and_suggestions(self):
+        from openresearch import insights
+
+        def entry(i, tool, status, secs, engines, pages, sources=None):
+            ev = []
+            for name, (results, err, timeout) in engines.items():
+                if timeout:
+                    ev.append({"t": 12, "kind": "timeout", "engine": name, "ms": 12000, "error": "no answer"})
+                else:
+                    ev.append({"t": 1, "kind": "engine", "engine": name, "results": results, "ms": 900,
+                               "error": err})
+            for url, err in pages:
+                ev.append({"t": 2, "kind": "page", "url": url, "chars": 0 if err else 900, "error": err})
+            return {"id": f"c{i}", "tool": tool, "status": status, "duration": secs, "budget": 50, "started": i,
+                    "events": ev, "metrics": {"source_engines": sources or {}}, "result_chars": 4000}
+
+        entries = [entry(i, "research", "ok", 48 if i < 2 else 20,
+                         {"ddg": (0, "", True), "tavily": (10, "", False), "wikipedia": (5, "", False)},
+                         [("https://blocked.example/a", "HTTP 403 (the site blocks automated readers with a browser check)"),
+                          ("https://ok.example/a", "")], {"tavily": 3})
+                   for i in range(6)]
+        stats = insights.aggregate(entries)
+        self.assertEqual(stats["tools"]["research"]["calls"], 6)
+        self.assertEqual(stats["engines"]["ddg"]["answered_pct"], 0)
+        self.assertEqual(stats["engines"]["tavily"]["sources"], 18)
+        self.assertEqual(stats["page_success_pct"], 50)
+        self.assertEqual(stats["worst_domains"][0], {"domain": "blocked.example", "failures": 6, "why": "bot check"})
+        tips = "\n".join(insights.suggest(stats))
+        self.assertIn("ddg answered only 0%", tips)
+        self.assertIn("wikipedia returned 30 results but none became a research source", tips)
+        self.assertIn("blocked.example failed 6 times (bot check)", tips)
+        self.assertIn("ran close to the time limit", tips)
+        self.assertNotIn("tavily", tips)                                     # the engine doing the work is fine
+        text = insights.format_stats(stats, insights.suggest(stats))
+        self.assertIn("tavily        answered 100% of 6 queries", text)
+        self.assertEqual(insights.cause("HTTP 419"), "refused")
+        self.assertEqual(insights.cause("skipped: this call's time limit was reached first"), "time limit")
+
+    def test_stats_from_server_log_and_github_copies(self):
+        from openresearch import insights
+        from openresearch.logship import GitHubLogShipper
+        call(self.f, "fetch", {"urls": [self.base + "/article"]})
+        call(self.f, "fetch", {"urls": [self.base + "/missing"]})
+        text = call(self.f, "log", {"stats": True})
+        self.assertIn("Statistics over 2 call(s)", text)
+        self.assertIn("Pages: 1 read, 1 failed (50% success)", text)
+        folder = self.tmp.name + "/logview/openresearch/2026-11-16"
+        os.makedirs(folder)
+        shipper = GitHubLogShipper("me/LogView", "tok", render=__import__("openresearch").trace.format_entry)
+        entries = self.f.log.recent(2)
+        with open(folder + "/031500-fetch-abc.md", "w", encoding="utf-8") as fh:
+            fh.write(shipper._document(list(reversed(entries))))
+        loaded = insights.load_dir(self.tmp.name + "/logview")
+        self.assertEqual([e["id"] for e in loaded], [e["id"] for e in entries])   # newest first, intact
+        self.assertEqual(insights.aggregate(loaded)["pages_failed"], 1)
+
     def test_long_rate_limit_wait_is_skipped_not_slept(self):
         import time
         from urllib.parse import urlsplit

@@ -19,6 +19,17 @@ import uuid
 from collections import deque
 
 _current: contextvars.ContextVar = contextvars.ContextVar("openresearch_trace", default=None)
+_PROCESS_START = time.time()
+SERVER = False                         # set by the MCP server: only then does "cold start" mean anything
+_calls_in_process = 0
+_calls_lock = threading.Lock()
+
+
+def _environment() -> dict:
+    """Where the call ran: version, deployed commit, and whether the process had just started."""
+    from .config import VERSION
+    commit = os.environ.get("RENDER_GIT_COMMIT") or os.environ.get("GIT_COMMIT") or ""
+    return {"version": VERSION, "commit": commit[:10], "host": os.environ.get("RENDER_SERVICE_NAME", "")}
 _MAX_EVENTS = 400
 PROBLEM_KINDS = ("error", "timeout")
 
@@ -52,6 +63,12 @@ class Trace:
         self.budget = float(budget or 0)
         self.deadline = self._t0 + self.budget if self.budget > 0 else None
         self.events: list = []
+        self.metrics: dict = {}          # numbers the tool reports about its own work (see note())
+        global _calls_in_process
+        with _calls_lock:
+            _calls_in_process += 1
+            self.call_number = _calls_in_process
+        self.uptime = round(self.started - _PROCESS_START, 1)
         self.status = "running"          # running | ok | error | timeout
         self.error = ""
         self.duration = 0.0
@@ -80,6 +97,16 @@ class Trace:
             else:
                 self._dropped += 1
 
+    def note(self, **values):
+        """Record numbers about this call's own work (queries run, sources used...). Numbers given
+        more than once are added up; other values are replaced."""
+        with self._lock:
+            for k, v in values.items():
+                if isinstance(v, (int, float)) and not isinstance(v, bool) and isinstance(self.metrics.get(k), (int, float)):
+                    self.metrics[k] += v
+                else:
+                    self.metrics[k] = _short(v, 200)
+
     def problems(self) -> list:
         """Events that record something going wrong (a failed engine, an unreadable page, a time-out)."""
         with self._lock:
@@ -97,13 +124,21 @@ class Trace:
             return True
 
     def as_dict(self) -> dict:
+        from . import insights
         with self._lock:
-            events = list(self.events)
-        return {"id": self.id, "tool": self.tool, "args": self.args, "started": self.started,
-                "duration": self.duration or round(self.elapsed(), 2), "status": self.status, "error": self.error,
-                "budget": self.budget, "result_chars": self.result_chars, "events": events,
-                "dropped_events": self._dropped,
-                "problems": sum(1 for e in events if is_problem(e))}
+            events, metrics = list(self.events), dict(self.metrics)
+        entry = {"id": self.id, "tool": self.tool, "args": self.args, "started": self.started,
+                 "duration": self.duration or round(self.elapsed(), 2), "status": self.status, "error": self.error,
+                 "budget": self.budget, "result_chars": self.result_chars, "events": events,
+                 "dropped_events": self._dropped, "problems": sum(1 for e in events if is_problem(e)),
+                 "metrics": metrics, "env": _environment(), "uptime": self.uptime,
+                 "cold_start": SERVER and self.call_number == 1 and self.uptime < 120}
+        try:
+            entry["summary"] = insights.summarize(entry)
+            entry["suggestions"] = insights.suggest_call(entry, entry["summary"])
+        except Exception as e:                # the analysis must never cost a call its log entry
+            entry["summary"], entry["suggestions"] = {}, [f"(summary failed: {type(e).__name__}: {e})"]
+        return entry
 
 
 # ------------------------------------------------------------------ current trace
@@ -123,6 +158,12 @@ def remaining(default=None):
     t = _current.get()
     left = t.remaining() if t is not None else None
     return default if left is None else left
+
+
+def note(**values):
+    t = _current.get()
+    if t is not None:
+        t.note(**values)
 
 
 def expired() -> bool:
@@ -314,6 +355,17 @@ def format_entry(e: dict, problems_only: bool = False) -> str:
              f"Started {_when(e['started'])}", "Arguments: " + json.dumps(e.get("args") or {}, ensure_ascii=False)]
     if e.get("error"):
         lines.append("Error: " + e["error"])
+    env = e.get("env") or {}
+    where = [f"version {env['version']}" if env.get("version") else "",
+             f"commit {env['commit']}" if env.get("commit") else "",
+             "first call after the server started (cold start)" if e.get("cold_start") else ""]
+    if any(where):
+        lines.append("Server: " + ", ".join(x for x in where if x))
+    if not problems_only and e.get("summary"):
+        from . import insights
+        lines += ["", "Summary:"] + ["  " + x for x in insights.format_summary(e["summary"])]
+    if e.get("suggestions"):
+        lines += ["", "Suggestions:"] + [f"  - {t}" for t in e["suggestions"]]
     events = [x for x in e.get("events", []) if not problems_only or is_problem(x)]
     if events:
         lines.append("\nTimeline (seconds from start; ! = problem):")

@@ -106,7 +106,8 @@ class GitHubLogShipper:
         for e in batch:
             what = (e.get("args") or {}).get("question") or (e.get("args") or {}).get("query") \
                 or (e.get("args") or {}).get("url") or ", ".join((e.get("args") or {}).get("urls") or [])
-            lines += [f"## {e['tool']} `{e['id']}`: {e['status']} in {e['duration']:.1f}s, {e['problems']} problem(s)",
+            lines += [f"## {e['tool']} `{e['id']}`: {e['status']} in {e['duration']:.1f}s, {e['problems']} problem(s)"
+                      + (f", {len(e['suggestions'])} suggestion(s)" if e.get("suggestions") else ""),
                       "", str(what)[:300], "", "```text",
                       (self._render(e) if self._render else json.dumps(e, indent=1)).replace("```", "'''"), "```", ""]
         lines += ["<details><summary>Raw data (JSON)</summary>", "", "```json",

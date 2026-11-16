@@ -120,6 +120,8 @@ def main(argv=None) -> int:
     p.add_argument("-n", type=int, default=20)
     p.add_argument("--problems", action="store_true", help="only calls (or steps) that went wrong")
     p.add_argument("--clear", action="store_true", help="empty the log")
+    p.add_argument("--stats", action="store_true", help="statistics and suggestions over many calls")
+    p.add_argument("--dir", default="", help="read log files from this folder (a LogView clone) instead")
 
     sub.add_parser("doctor", help="check which engines and features work from here")
     p = sub.add_parser("cache", help="cache stats / clear")
@@ -149,11 +151,24 @@ def main(argv=None) -> int:
 def _run(a, f) -> int:
     if True:
         if a.cmd == "log":
+            if a.dir:                            # the copies kept in a GitHub log repository
+                from . import insights, trace as _trace
+                entries = insights.load_dir(a.dir)
+                if a.id:
+                    e = next((x for x in entries if x.get("id") == a.id), None)
+                    print(_trace.format_entry(e, a.problems) if e else f"No call {a.id} under {a.dir}")
+                elif a.stats:
+                    stats = insights.aggregate(entries[:a.n] if a.n != 20 else entries)
+                    print(insights.format_stats(stats, insights.suggest(stats), f" from {a.dir}"))
+                else:
+                    print(_trace.format_list(entries[:a.n]))
+                return 0
             if a.clear:
                 f.log.clear()
                 print("log cleared")
             else:
-                print(call(f, "log", {"id": a.id, "n": a.n, "problems_only": a.problems}))
+                n = a.n if (a.n != 20 or not a.stats) else 100
+                print(call(f, "log", {"id": a.id, "n": n, "problems_only": a.problems, "stats": a.stats}))
             return 0
         if a.cmd == "mcp":
             from . import mcp_server

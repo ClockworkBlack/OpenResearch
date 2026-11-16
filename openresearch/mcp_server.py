@@ -33,6 +33,7 @@ class Server:
 
     def __init__(self, fetcher: Fetcher | None = None):
         self.fetcher = fetcher or Fetcher()
+        trace.SERVER = True
 
     def handle(self, msg: dict):
         """One JSON-RPC message in, one response dict out (None for notifications)."""
@@ -202,7 +203,8 @@ def serve_http(host: str = "127.0.0.1", port: int = 8765, token: str = "", serve
                 if not self._authorized() or (not token and self._foreign_origin()):
                     return self._send(404, b'{"error":"not found: the log is at /log/<your OPENRESEARCH_TOKEN>"}')
                 q = parse_qs(query)
-                args = {"id": q.get("id", [""])[0], "n": q.get("n", ["30"])[0],
+                stats = q.get("stats", [""])[0] not in ("", "0")
+                args = {"id": q.get("id", [""])[0], "n": q.get("n", ["100" if stats else "30"])[0], "stats": stats,
                         "problems_only": q.get("problems", [""])[0] not in ("", "0")}
                 try:
                     text = show_log(server.fetcher, args)

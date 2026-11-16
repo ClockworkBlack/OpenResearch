@@ -11,7 +11,8 @@ Optional ones (`ddgs`, `pypdf`, `playwright`, `brotli`) must be imported lazily 
 - `crawl.py` map and crawl; `structured.py` selector/table/JSON-LD extraction
 - `tools.py` the tool schemas (six web tools plus `log`) and dispatcher, shared by `mcp_server.py` and `cli.py`
 - `logship.py` copies finished log entries to a GitHub repository (optional, off by default)
-- `trace.py` per-call log and time limit: `trace.event(...)` records a step, `trace.remaining()` is the time left
+- `trace.py` per-call log and time limit: `trace.event(...)` records a step, `trace.note(...)` records a number about the call's work, `trace.remaining()` is the time left
+- `insights.py` per-call summary, statistics across calls and suggestions, also from LogView files
 
 ## Rules
 
