@@ -28,7 +28,8 @@ class Config:
     min_delay: float = 0.3           # seconds between requests to one host
     retries: int = 2
     wayback_fallback: bool = True    # try the Internet Archive when a page is blocked or gone
-    render: str = "auto"             # auto | never | always (needs Playwright)
+    render: str = "ask"              # ask: only when the caller asks | auto: when a page comes back empty |
+                                     # always | never. Needs Playwright.
     render_concurrency: int = 1      # browsers open at once: each needs ~150-250 MB of memory
     engines: list = field(default_factory=list)          # override default web engines
     exclude_domains: list = field(default_factory=list)  # never return these

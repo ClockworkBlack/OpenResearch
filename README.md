@@ -197,7 +197,7 @@ Environment variables (or the same keys, lower-case, in `~/.config/openresearch/
 | `OPENRESEARCH_ALLOW_PRIVATE` | `0` | Allow `localhost` and private-network URLs (needed to crawl a site on your own machine or LAN) |
 | `OPENRESEARCH_MIN_DELAY` | `0.3` | Seconds between requests to one host |
 | `OPENRESEARCH_WAYBACK_FALLBACK` | `1` | Use the Internet Archive when a page is blocked or gone |
-| `OPENRESEARCH_RENDER` | `auto` | `auto`, `never` or `always` for JavaScript rendering |
+| `OPENRESEARCH_RENDER` | `ask` | `ask` (only with `render: true`), `auto` (also empty pages), `always` or `never` |
 | `OPENRESEARCH_RENDER_CONCURRENCY` | `1` | Browsers open at once (each needs a few hundred MB) |
 | `OPENRESEARCH_USER_AGENT` | identifies as OpenResearch | Request User-Agent |
 
@@ -322,8 +322,11 @@ Hacker News) fill in. An engine that gives
 no answer twice in a row is left out for three minutes, so later calls do not wait for it again.
 
 **Browser in the Docker image.** The image includes Playwright with Chromium's headless shell, so
-pages built by JavaScript (including content inside web components, as on MSN) are rendered on the
-server: automatically by `fetch` and `crawl` when a page arrives empty, or on request with `render`.
+pages built by JavaScript (including content inside web components, as on MSN) can be rendered on the
+server. The browser is opt-in: it only runs when a call asks for it with `render: true`, so other pages
+are never slowed down. A page that needs it says so ("built by JavaScript: ask again with render: true").
+The first render takes 10-45s; the result is then remembered for 6 hours, so asking again is instant
+(`fresh: true` renders anew). Set `OPENRESEARCH_RENDER=auto` to render empty pages without being asked.
 `research` never renders, to stay fast. One page renders at a time. On a host with 512 MB (Render's
 free and starter plans) a very heavy page can run the browser out of memory: that render fails and is
 logged, the server keeps running. Set `OPENRESEARCH_RENDER=never` to switch rendering off.
