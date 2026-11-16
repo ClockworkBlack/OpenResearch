@@ -20,6 +20,7 @@ import zlib
 from dataclasses import dataclass, field
 from urllib.parse import quote, urldefrag, urljoin, urlsplit, urlunsplit
 
+from . import trace
 from .config import ROBOTS_TOKEN, Config
 
 try:
@@ -28,6 +29,7 @@ except ImportError:  # optional
     brotli = None
 
 _RETRY_STATUS = frozenset((429, 500, 502, 503, 504))
+_OUT_OF_TIME = "skipped: this call's time limit was reached first"
 _REDIRECT = frozenset((301, 302, 303, 307, 308))
 
 
@@ -189,6 +191,13 @@ class Fetcher:
     def __init__(self, config: Config | None = None):
         self.cfg = config or Config.load()
         self.cache = Cache(self.cfg.cache_dir)
+        shipper = None
+        if self.cfg.log_github_repo and self.cfg.log_github_token:
+            from .logship import GitHubLogShipper
+            shipper = GitHubLogShipper(self.cfg.log_github_repo, self.cfg.log_github_token, self.cfg.log_github_dir,
+                                       self.cfg.log_github_api, render=trace.format_entry)
+        self.log = trace.Log(self.cfg.cache_dir, self.cfg.log_keep, self.cfg.log_stderr, shipper)
+        self.engine_health: dict = {}        # engine -> [timeouts in a row, skip until (monotonic)]
         self._opener = urllib.request.build_opener(
             _NoRedirect(), urllib.request.HTTPSHandler(context=ssl.create_default_context()))
         self._lock = threading.Lock()
@@ -198,6 +207,7 @@ class Fetcher:
 
     def close(self):
         self.cache.close()
+        self.log.close()
 
     # ------------------------------------------------------------ safety
     def check_url(self, url: str) -> str:
@@ -233,12 +243,14 @@ class Fetcher:
             if origin in self._robots:
                 return self._robots[origin]
         rp = None
-        r = self.fetch(origin + "/robots.txt", robots=False, max_age=86400, timeout=10)
+        r = self.fetch(origin + "/robots.txt", robots=False, max_age=86400, timeout=6, retries=0)
         if r.status == 200 and "<html" not in r.text[:500].lower():
             rp = urllib.robotparser.RobotFileParser()
             rp.parse(r.text.splitlines())
         with self._lock:
             self._robots[origin] = rp
+            # a Crawl-delay spaces out page requests; reading robots.txt itself does not start that clock
+            self._host_last.pop(urlsplit(origin).netloc, None)
         return rp
 
     def allowed(self, url: str) -> bool:
@@ -255,7 +267,9 @@ class Fetcher:
         rp = self._robots_for(origin)
         return list(rp.site_maps() or []) if rp is not None else []
 
-    def _throttle(self, url: str, delay: float | None):
+    def _throttle(self, url: str, delay: float | None, max_wait: float | None = None) -> str:
+        """Wait this host's turn. Returns '' when it is our turn, or why the request is skipped: the wait
+        would be longer than the caller (max_wait) or the tool call's time limit allows."""
         host = urlsplit(url).netloc
         wait = self.cfg.min_delay if delay is None else delay
         rp = self._robots.get(f"{urlsplit(url).scheme}://{host}")
@@ -267,14 +281,18 @@ class Fetcher:
             except Exception:
                 pass
         if wait <= 0:
-            return
+            return ""
         with self._lock:
             lock = self._host_locks.setdefault(host, threading.Lock())
         with lock:
             pause = self._host_last.get(host, 0) + wait - time.monotonic()
             if pause > 0:
+                left = trace.remaining()
+                if (left is not None and pause > left - 1) or (max_wait is not None and pause > max_wait):
+                    return f"skipped: {host} asks for {wait:.0f}s between requests, too long to wait in this call"
                 time.sleep(pause)
             self._host_last[host] = time.monotonic()
+        return ""
 
     # ------------------------------------------------------------ transport
     def _once(self, url, headers, timeout, data):
@@ -314,12 +332,23 @@ class Fetcher:
             reason = getattr(e, "reason", None)
             return 0, {}, b"", f"{type(e).__name__}: {reason or e}"
 
-    def fetch(self, url: str, *, max_age: int | None = None, headers: dict | None = None,
-              robots: bool | None = None, timeout: float | None = None, data: bytes | None = None,
-              delay: float | None = None, retries: int | None = None) -> Response:
+    def fetch(self, url: str, **kw) -> Response:
         """GET (or POST when data is given) a URL. Never raises: check .ok / .error.
 
-        retries overrides the configured retry count (0 = one attempt), for callers on a time budget."""
+        Keywords: max_age, headers, robots, timeout, data, delay, retries (overrides the configured
+        retry count; 0 = one attempt) and max_wait (skip the request rather than wait longer than this
+        for the host's rate limit). Inside a tool call the request is also held to what
+        is left of the call's time limit, and is written to the call's log."""
+        t0 = time.monotonic()
+        r = self._fetch(url, **kw)
+        if trace.current() is not None:
+            trace.event("fetch", url=url, status=r.status, ms=int((time.monotonic() - t0) * 1000),
+                        bytes=len(r.body), cached=r.via == "cache", error=r.error)
+        return r
+
+    def _fetch(self, url: str, *, max_age: int | None = None, headers: dict | None = None,
+               robots: bool | None = None, timeout: float | None = None, data: bytes | None = None,
+               delay: float | None = None, retries: int | None = None, max_wait: float | None = None) -> Response:
         try:
             url = normalize_url(url)
         except ValueError as e:
@@ -354,8 +383,13 @@ class Fetcher:
         tries = max(self.cfg.retries if retries is None else retries, 0)
         for _hop in range(8):
             for attempt in range(tries + 1):
-                self._throttle(cur, delay)
-                status, hdrs, body, error = self._once(cur, h, timeout, data)
+                left = trace.remaining()
+                if left is not None and left < 0.5:      # the tool call's time limit is used up
+                    return Response(url=url, final_url=cur, error=_OUT_OF_TIME)
+                skipped = self._throttle(cur, delay, max_wait)
+                if skipped:
+                    return Response(url=url, final_url=cur, error=skipped)
+                status, hdrs, body, error = self._once(cur, h, timeout if left is None else min(timeout, left), data)
                 transient = status in _RETRY_STATUS or (
                     status == 0 and not re.search(r"403|407|certificate|larger than|decompress", error, re.I))
                 if not transient or attempt == tries:
@@ -365,6 +399,8 @@ class Fetcher:
                 except ValueError:
                     pause = 0.6 * (2 ** attempt)
                 if pause > 10:                       # told to come back much later: waiting won't help now
+                    break
+                if trace.remaining(99) < pause + 2:  # no time left in this call for another try
                     break
                 time.sleep(min(pause, 10.0) + random.random() * 0.3)
             if status in _REDIRECT and hdrs.get("location"):

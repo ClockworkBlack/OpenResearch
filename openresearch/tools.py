@@ -1,8 +1,10 @@
-"""The six tools, defined once and shared by the MCP server and the CLI."""
+"""The tools, defined once and shared by the MCP server and the CLI: six that read the web, and
+`log`, which shows what the others did."""
 from __future__ import annotations
 
 import json
 
+from . import trace
 from .crawl import crawl, format_crawl, map_site
 from .fetch import Fetcher
 from .page import read, read_many
@@ -138,7 +140,22 @@ TOOLS = [
 ]
 
 
-_TITLES = {"research": "Research a question", "search": "Search the web", "fetch": "Read web pages",
+TOOLS.append({
+    "name": "log",
+    "description": (
+        "What happened inside recent OpenResearch calls: which search engines answered or failed, which pages "
+        "were read or could not be and why, and how long each step took. Use it when a call was slow, came "
+        "back empty, or gave odd results. With no arguments it lists recent calls; with `id` (shown at the "
+        "end of every result) it shows that call's full timeline."),
+    "inputSchema": {"type": "object", "properties": {
+        "id": _s("A call id, to see that call's timeline."),
+        "n": _i("How many recent calls to list.", 10, minimum=1, maximum=100),
+        "problems_only": {"type": "boolean", "default": False,
+                          "description": "List only calls that failed or had problems; in a timeline, only the problems."},
+    }},
+})
+
+_TITLES = {"log": "Show the call log", "research": "Research a question", "search": "Search the web", "fetch": "Read web pages",
            "crawl": "Crawl a website", "map": "List a site's URLs", "extract": "Extract structured data"}
 for _t in TOOLS:      # every tool only reads the public web: clients may run them without a confirmation step
     _t["title"] = _TITLES[_t["name"]]
@@ -146,8 +163,44 @@ for _t in TOOLS:      # every tool only reads the public web: clients may run th
                          "idempotentHint": True, "openWorldHint": True}
 
 
+def show_log(f: Fetcher, a: dict) -> str:
+    only = bool(a.get("problems_only"))
+    if a.get("id"):
+        entry = f.log.get(str(a["id"]))
+        if entry is None:
+            return f"No call with id {a['id']} in the log (it keeps the last {f.log.keep} calls)."
+        return trace.format_entry(entry, problems_only=only)
+    text = trace.format_list(f.log.recent(int(a.get("n", 10)), problems_only=only))
+    if f.log.shipper is not None:
+        text += "\nCopy on GitHub - " + f.log.shipper.status()
+    return text
+
+
 def call(f: Fetcher, name: str, a: dict) -> str:
-    """Run a tool and return its text result. Raises ValueError for bad input."""
+    """Run a tool and return its text result. Raises ValueError for bad input. The call is logged."""
+    return call_traced(f, name, a)[0]
+
+
+def call_traced(f: Fetcher, name: str, a: dict, tr: "trace.Trace | None" = None) -> tuple:
+    """Run a tool under a Trace (time limit + event log). Returns (text, trace); trace is None for `log`."""
+    if name == "log":
+        return show_log(f, a), None
+    tr = tr or trace.Trace(name, a, f.cfg.tool_timeout)
+    done = False
+    try:
+        with trace.active(tr):
+            text = _dispatch(f, name, a)
+        done = tr.finish("ok", result_chars=len(text))
+        return text, tr
+    except Exception as e:
+        done = tr.finish("error", f"{type(e).__name__}: {e}")
+        raise
+    finally:
+        if done:
+            f.log.save(tr)
+
+
+def _dispatch(f: Fetcher, name: str, a: dict) -> str:
     if name == "research":
         return research(f, a["question"], queries=a.get("queries"), depth=a.get("depth", "standard"),
                         max_tokens=a.get("max_tokens"), vertical=a.get("vertical", "web"),

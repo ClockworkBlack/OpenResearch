@@ -10,3 +10,8 @@ services:
     envVars:
       - key: OPENRESEARCH_TOKEN
         generateValue: true
+      # Optional: keep the call log in a GitHub repository, so it survives restarts (README: Seeing what happened)
+      - key: OPENRESEARCH_LOG_GITHUB_REPO
+        sync: false
+      - key: OPENRESEARCH_LOG_GITHUB_TOKEN
+        sync: false

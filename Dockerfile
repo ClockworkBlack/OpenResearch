@@ -7,6 +7,6 @@ WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY openresearch ./openresearch
 RUN pip install --no-cache-dir ".[search,pdf]"
-ENV HOST=0.0.0.0 PORT=8765 OPENRESEARCH_CACHE_DIR=/tmp/openresearch
+ENV HOST=0.0.0.0 PORT=8765 OPENRESEARCH_CACHE_DIR=/tmp/openresearch OPENRESEARCH_LOG_STDERR=1
 EXPOSE 8765
 CMD ["python", "-m", "openresearch", "mcp", "--http"]

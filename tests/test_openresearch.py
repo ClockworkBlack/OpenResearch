@@ -7,6 +7,7 @@ import tempfile
 import threading
 import unittest
 from unittest import mock
+import urllib.error
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -549,7 +550,7 @@ class TestMcp(Base):
         self.assertEqual(r["result"]["protocolVersion"], "2025-03-26")
         self.assertIsNone(self.srv.handle({"jsonrpc": "2.0", "method": "notifications/initialized"}))
         tools = self.srv.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})["result"]["tools"]
-        self.assertEqual({t["name"] for t in tools}, {"research", "search", "fetch", "crawl", "map", "extract"})
+        self.assertEqual({t["name"] for t in tools}, {"research", "search", "fetch", "crawl", "map", "extract", "log"})
         for t in tools:
             self.assertEqual(t["inputSchema"]["type"], "object")
             self.assertTrue(t["annotations"]["readOnlyHint"])
@@ -602,7 +603,7 @@ class TestMcp(Base):
         try:
             self.assertEqual(post(url)[0], 404)
             self.assertEqual(post(url + "/wrong")[0], 404)
-            self.assertEqual(len(post(url, {"Authorization": "Bearer s3cret"})[1]["result"]["tools"]), 6)
+            self.assertEqual(len(post(url, {"Authorization": "Bearer s3cret"})[1]["result"]["tools"]), 7)
             self.assertEqual(post(url + "/s3cret")[0], 200)
         finally:
             http.shutdown()
@@ -661,6 +662,247 @@ class TestMcp(Base):
         with socket.create_connection(("127.0.0.1", post.port), timeout=10) as raw:
             raw.sendall("POST /mcp/caf\u00e9 HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\n\r\n{}".encode())
             self.assertIn(b" 404 ", raw.recv(200))
+
+
+class TestLog(Base):
+    """The per-call log, and the time limits that keep a call from hanging."""
+
+    def test_call_is_logged_with_its_problems(self):
+        text = call(self.f, "fetch", {"urls": [self.base + "/article", self.base + "/missing"]})
+        self.assertIn("Solar Storage", text)
+        entry = self.f.log.recent(1)[0]
+        self.assertEqual((entry["tool"], entry["status"]), ("fetch", "ok"))
+        self.assertGreaterEqual(entry["problems"], 1)
+        pages = {e["url"]: e for e in entry["events"] if e["kind"] == "page"}
+        self.assertIn("HTTP 404", pages[self.base + "/missing"]["error"])
+        self.assertGreater(pages[self.base + "/article"]["chars"], 100)
+        listing = call(self.f, "log", {})
+        self.assertIn(entry["id"], listing)
+        detail = call(self.f, "log", {"id": entry["id"]})
+        self.assertIn("/missing -> FAILED - HTTP 404", detail)
+        self.assertIn("/article -> read", detail)
+        only = call(self.f, "log", {"id": entry["id"], "problems_only": True})
+        self.assertNotIn("/article -> read", only)
+        self.assertIn("No call with id", call(self.f, "log", {"id": "nope"}))
+        self.assertEqual(len(self.f.log.recent(5)), 1)                 # looking at the log is not itself logged
+
+    def test_crash_is_captured(self):
+        with mock.patch("openresearch.tools.research", side_effect=ZeroDivisionError("boom")):
+            with self.assertRaises(ZeroDivisionError):
+                call(self.f, "research", {"question": "anything"})
+        entry = self.f.log.recent(1)[0]
+        self.assertEqual(entry["status"], "error")
+        self.assertIn("ZeroDivisionError: boom", entry["error"])
+        self.assertIn("Traceback", call(self.f, "log", {"id": entry["id"]}))
+        self.assertEqual(len(self.f.log.recent(5, problems_only=True)), 1)
+
+    def test_log_keeps_only_the_newest(self):
+        from openresearch import trace
+        log = trace.Log(self.tmp.name + "/small", keep=3)
+        for i in range(6):
+            t = trace.Trace("search", {"query": f"q{i}"})
+            t.finish("ok")
+            log.save(t)
+        self.assertEqual([e["args"]["query"] for e in log.recent(10)], ["q5", "q4", "q3"])
+        log.close()
+
+    def test_hung_engine_is_not_waited_for(self):
+        import time
+
+        def fast(f, q, n, o):
+            return [S.Result("Widget guide", "https://a.example/widgets", "widget frequency", "fast")]
+
+        def hung(f, q, n, o):
+            time.sleep(4)
+            return []
+
+        old = dict(S.ENGINES)
+        S.ENGINES.update(fast=fast, hung=hung)
+        self.f.cfg.engine_timeout = 0.5
+        try:
+            t0 = time.monotonic()
+            results, report = search(self.f, "widget frequency", engines=["fast", "hung"])
+        finally:
+            S.ENGINES.clear()
+            S.ENGINES.update(old)
+        self.assertLess(time.monotonic() - t0, 2.5)
+        self.assertEqual([r.url for r in results], ["https://a.example/widgets"])
+        self.assertIn("no answer within", report["hung"])
+
+    def test_backup_engines_step_in(self):
+        def empty(f, q, n, o):
+            raise RuntimeError("throttled")
+
+        def backup(f, q, n, o):
+            return [S.Result("Widget news", "https://news.example/widgets", "widget frequency", "bingnews")]
+
+        old = dict(S.ENGINES)
+        S.ENGINES.update(ddg=empty, wikipedia=lambda f, q, n, o: [], bingnews=backup, hackernews=lambda f, q, n, o: [])
+        try:
+            results, report = search(self.f, "widget frequency")
+            named, named_report = search(self.f, "widget frequency", engines=["ddg"])
+        finally:
+            S.ENGINES.clear()
+            S.ENGINES.update(old)
+        self.assertEqual([r.url for r in results], ["https://news.example/widgets"])
+        self.assertIn("throttled", report["ddg"])
+        self.assertEqual(report["bingnews"], 1)
+        self.assertEqual((named, list(named_report)), ([], ["ddg"]))      # engines named by the caller: no backups
+
+    def test_time_limit_returns_what_there_is(self):
+        import time
+        self.f.cfg.tool_timeout = 2.0
+        t0 = time.monotonic()
+        text = call(self.f, "research", {"question": "solar storage battery prices", "queries": [],
+                                         "urls": [self.base + "/article", self.base + "/slow"]})
+        self.assertLess(time.monotonic() - t0, 2.9)                      # /slow takes 3 seconds
+        self.assertIn("18 percent", text)                                # the page that was ready is used
+        self.assertIn("Stopped at the time limit", text)
+        self.assertIn("/slow (skipped: this call's time limit", text)
+        entry = self.f.log.recent(1)[0]
+        self.assertTrue(any(e["kind"] == "timeout" for e in entry["events"]))
+
+    def test_log_is_copied_to_github(self):
+        import base64
+        from openresearch.logship import GitHubLogShipper, repo_name
+        self.assertEqual(repo_name("https://github.com/ClockworkBlack/LogView.git"), "ClockworkBlack/LogView")
+        self.assertEqual(repo_name("ClockworkBlack/LogView"), "ClockworkBlack/LogView")
+        self.assertEqual(repo_name("not a repo"), "")
+        cfg = Config(cache_dir=self.tmp.name + "/gh", allow_private=True, min_delay=0, wayback_fallback=False,
+                     render="never", log_github_repo="https://github.com/me/LogView.git", log_github_token="tok",
+                     log_github_api=self.base)
+        f = Fetcher(cfg)
+        self.site.puts.clear()
+        call(f, "fetch", {"urls": [self.base + "/article"]})
+        call(f, "fetch", {"urls": [self.base + "/missing"]})
+        self.assertEqual(self.site.puts, [])                              # batched: nothing sent yet
+        self.assertIn("2 waiting", call(f, "log", {}))
+        f.close()                                                         # shutting down sends what is waiting
+        (path, auth, body), = self.site.puts
+        self.assertRegex(path, r"^/repos/me/LogView/contents/openresearch/\d{4}-\d\d-\d\d/\d{6}-fetch-\w{8}-and-1-more\.md$")
+        self.assertEqual(auth, "Bearer tok")
+        text = base64.b64decode(body["content"]).decode()
+        self.assertIn("/article -> read", text)
+        self.assertIn("/missing -> FAILED - HTTP 404", text)
+        self.assertIn("1 problem(s)", body["message"])
+
+        entry = {"id": "abcd1234", "tool": "search", "status": "ok", "duration": 1.0, "problems": 0,
+                 "started": 1_800_000_000.0, "args": {"query": "q"}, "events": []}
+        down = GitHubLogShipper("me/LogView", "tok", api="http://127.0.0.1:1", delay=60)
+        down.add(entry)
+        self.assertFalse(down.flush())                                    # GitHub unreachable: the call is kept
+        self.assertIn("1 waiting", down.status())
+        self.assertIn("could not reach GitHub", down.status())
+        down.api = self.base
+        self.assertTrue(down.flush())
+        self.assertIn("1 call(s) saved", down.status())
+        denied = GitHubLogShipper("me/denied", "tok", api=self.base, delay=60)
+        denied.add(entry)
+        denied.flush()
+        self.assertIn("may not write", denied.status())
+        off = GitHubLogShipper("me/LogView", "", api=self.base)
+        off.add(entry)
+        self.assertEqual(off.status(), "off")
+
+    def test_engine_that_keeps_hanging_is_rested(self):
+        import time
+        calls = []
+
+        def fast(f, q, n, o):
+            return [S.Result("Widget guide", "https://a.example/widgets", "widget frequency", "fast")]
+
+        def hung(f, q, n, o):
+            calls.append(q)
+            time.sleep(3.6)
+            return []
+
+        old, old_web = dict(S.ENGINES), S.VERTICALS["web"]
+        S.ENGINES.update(fast=fast, hung=hung)
+        S.VERTICALS["web"] = ["fast", "hung"]
+        self.f.cfg.engine_timeout = 3.1
+        try:
+          with mock.patch.dict(S.BACKUP, {}, clear=True):                 # keep the test offline
+              search(self.f, "widget frequency")
+              search(self.f, "widget frequency")                          # second time-out in a row
+              t0 = time.monotonic()
+              results, report = search(self.f, "widget frequency")          # third call: not asked, not waited for
+              self.assertLess(time.monotonic() - t0, 1)
+              self.assertEqual(len(calls), 2)
+              self.assertIn("skipped: no answer the last 2 times", report["hung"])
+              self.assertEqual(len(results), 1)
+              search(self.f, "widget frequency", engines=["hung", "fast"])  # named by the caller: always asked
+              self.assertEqual(len(calls), 3)
+        finally:
+            S.ENGINES.clear()
+            S.ENGINES.update(old)
+            S.VERTICALS["web"] = old_web
+
+    def test_long_rate_limit_wait_is_skipped_not_slept(self):
+        import time
+        from urllib.parse import urlsplit
+        url = self.base + "/article"
+        self.f._host_last[urlsplit(url).netloc] = time.monotonic()
+        t0 = time.monotonic()
+        r = self.f.fetch(url, delay=30, max_wait=1, max_age=0, robots=False)
+        self.assertLess(time.monotonic() - t0, 1)
+        self.assertIn("asks for 30s between requests", r.error)
+
+    def test_mcp_abandons_a_call_that_overruns(self):
+        import time
+        srv = mcp_server.Server(self.f)
+        srv.grace = 0.2
+        self.f.cfg.tool_timeout = 0.2
+        with mock.patch("openresearch.tools._dispatch", side_effect=lambda *a: time.sleep(1.5) or "late"):
+            r = srv.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                            "params": {"name": "search", "arguments": {"query": "x"}}})["result"]
+            self.assertTrue(r["isError"])
+            self.assertIn("gave up", r["content"][0]["text"])
+            time.sleep(1.6)                                              # let the abandoned worker finish
+        entries = self.f.log.recent(5)
+        self.assertEqual([e["status"] for e in entries], ["timeout"])    # logged once, and not rewritten as ok
+
+    def test_mcp_result_carries_the_call_id(self):
+        srv = mcp_server.Server(self.f)
+        r = srv.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                        "params": {"name": "fetch", "arguments": {"urls": [self.base + "/missing"]}}})["result"]
+        note = r["content"][1]["text"]
+        entry = self.f.log.recent(1)[0]
+        self.assertIn(f"[call {entry['id']}:", note)
+        self.assertIn("1 problem(s)", note)
+        listed = srv.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                             "params": {"name": "log", "arguments": {}}})["result"]
+        self.assertIn(entry["id"], listed["content"][0]["text"])
+
+    def test_log_page_and_encoded_token(self):
+        token = "a+b/c="
+        srv = mcp_server.serve_http("127.0.0.1", 0, token, mcp_server.Server(self.f))
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        base = f"http://127.0.0.1:{srv.server_address[1]}"
+
+        def get(path, method="GET", body=None):
+            req = urllib.request.Request(base + path, data=body, method=method,
+                                         headers={"Content-Type": "application/json"})
+            try:
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    return resp.status, resp.read().decode()
+            except urllib.error.HTTPError as e:
+                return e.code, e.read().decode()
+        try:
+            call(self.f, "fetch", {"urls": [self.base + "/article"]})
+            ping = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "ping"}).encode()
+            self.assertEqual(get("/mcp/a+b/c=", "POST", ping)[0], 200)
+            self.assertEqual(get("/mcp/a%2Bb%2Fc%3D", "POST", ping)[0], 200)      # the same token, percent-encoded
+            self.assertEqual(get("/mcp/a%2Bb", "POST", ping)[0], 404)
+            status, text = get("/log/a%2Bb%2Fc%3D")
+            self.assertEqual(status, 200)
+            self.assertIn("fetch", text)
+            call_id = self.f.log.recent(1)[0]["id"]
+            self.assertIn("/article -> read", get(f"/log/a+b/c=?id={call_id}")[1])
+            self.assertEqual(get("/log")[0], 404)
+            self.assertEqual(get("/log/wrong")[0], 404)
+        finally:
+            srv.shutdown()
+            srv.server_close()
 
 
 class TestCli(Base):
