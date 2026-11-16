@@ -42,7 +42,7 @@ def _doctor(f: Fetcher) -> int:
             bad += not skip
         print(f"  engine {name:<14} {state}  [{time.time() - t:.1f}s]")
     has_ddgs = any(__import__("importlib").util.find_spec(m) for m in ("ddgs", "duckduckgo_search"))
-    if not (has_ddgs or f.cfg.brave_api_key or f.cfg.searxng_url):
+    if not (has_ddgs or f.cfg.brave_api_key or f.cfg.tavily_api_key or f.cfg.searxng_url):
         print("  hint: web search leans on DuckDuckGo alone. `pip install ddgs`, or set BRAVE_API_KEY or\n"
               "        OPENRESEARCH_SEARXNG_URL, for backups when it throttles you (README: Search backends)")
     p = read(f, "https://example.com", max_age=0)

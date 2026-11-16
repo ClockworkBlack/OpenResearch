@@ -184,9 +184,19 @@ def serve_http(host: str = "127.0.0.1", port: int = 8765, token: str = "", serve
             path, _, query = self.path.partition("?")
             if path == "/health":
                 info = {"ok": True, "version": VERSION}
-                shipper = server.fetcher.log.shipper
-                if shipper is not None:          # no repository name here: this page needs no token
-                    info["log_copy"] = "error" if shipper.last_error else "on"
+                cfg, shipper = server.fetcher.cfg, server.fetcher.log.shipper
+                # setting names only, never values: this page needs no token
+                if shipper is not None and shipper.enabled:
+                    info["log_copy"] = "error (ask the log tool why)" if shipper.last_error else "on"
+                elif cfg.log_github_repo or cfg.log_github_token:
+                    missing = ("OPENRESEARCH_LOG_GITHUB_TOKEN" if not cfg.log_github_token else
+                               "OPENRESEARCH_LOG_GITHUB_REPO" if not cfg.log_github_repo else "")
+                    info["log_copy"] = (f"off: {missing} is not set" if missing else
+                                        "off: OPENRESEARCH_LOG_GITHUB_REPO must look like owner/name")
+                else:
+                    info["log_copy"] = "off: OPENRESEARCH_LOG_GITHUB_REPO and OPENRESEARCH_LOG_GITHUB_TOKEN are not set"
+                info["search_keys"] = [k for k, v in (("tavily", cfg.tavily_api_key), ("brave", cfg.brave_api_key),
+                                                      ("searxng", cfg.searxng_url)) if v]
                 return self._send(200, json.dumps(info).encode())
             if path == "/log" or path.startswith("/log/"):   # the call log as a plain-text page
                 if not self._authorized() or (not token and self._foreign_origin()):
