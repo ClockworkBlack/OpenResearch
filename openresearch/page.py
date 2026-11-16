@@ -148,8 +148,12 @@ def _strip_tags(s: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", s or "")).strip()
 
 
-def xml_to_markdown(text: str) -> tuple:
+def xml_to_markdown(text: str, base_url: str = "") -> tuple:
     """RSS/Atom feeds and sitemaps become link lists; other XML is returned as-is."""
+    from .feeds import feed_markdown
+    md, title = feed_markdown(text, base_url)
+    if md:
+        return md, title
     try:
         root = ET.fromstring(text.encode("utf-8"))
     except ET.ParseError:
@@ -189,6 +193,11 @@ def _convert(r: Response, mode: str, links: str, images: bool) -> dict:
             return {"error": "PDF has no extractable text (scanned image, or install pypdf)"}
         return {"markdown": md, "title": title or path.rsplit("/", 1)[-1]}
     if "json" in ct or path.endswith(".json"):
+        if b"jsonfeed.org" in r.body[:2000]:
+            from .feeds import feed_markdown
+            md, title = feed_markdown(r.text, r.final_url or r.url)
+            if md:
+                return {"markdown": md, "title": title}
         try:
             pretty = json.dumps(r.json(), indent=1, ensure_ascii=False)
         except ValueError:
@@ -199,7 +208,7 @@ def _convert(r: Response, mode: str, links: str, images: bool) -> dict:
     if "html" in ct or head.startswith(("<!doctype html", "<html")) or ("<body" in head or "<head" in head):
         return extract_html(text, r.final_url or r.url, mode, links, images)
     if "xml" in ct or head.startswith("<?xml") or path.endswith((".xml", ".rss", ".atom")):
-        md, title = xml_to_markdown(text)
+        md, title = xml_to_markdown(text, r.final_url or r.url)
         return {"markdown": md, "title": title}
     if ct.startswith("text/") or not ct or path.endswith((".md", ".txt", ".csv", ".rst")):
         if "\x00" in text[:2000]:
