@@ -65,19 +65,39 @@ def research(f: Fetcher, question: str, *, queries=None, depth: str = "standard"
                 fused.setdefault(key, [r, 0.0])[1] += 1.0 / (30 + rank)
                 snippets[key] = r
     ranked = [r for r, _ in sorted(fused.values(), key=lambda x: -x[1])]
-    per, picks = {}, []
-    for u in urls or []:
-        picks.append(u)
-    for r in ranked:
-        if len(picks) >= n_pages + len(urls or []):
-            break
-        if per.get(r.domain, 0) >= 2 or r.url in picks:
-            continue
-        per[r.domain] = per.get(r.domain, 0) + 1
-        picks.append(r.url)
-    unread = [r for r in ranked if r.url not in picks]
+    given = list(dict.fromkeys(u for u in (urls or []) if u and u.strip()))
+    per, picks, seen = {}, list(given), {canonical(u) for u in given}
+    queue = [r for r in ranked if canonical(r.url) not in seen]
 
-    pages = read_many(f, picks, workers=8, max_tokens=100000, timeout=15, max_age=max_age)
+    def take(count: int) -> list:
+        """Next `count` results to read, at most two per domain."""
+        batch = []
+        for r in list(queue):
+            if len(batch) >= count:
+                break
+            if per.get(r.domain, 0) >= 2:
+                continue
+            per[r.domain] = per.get(r.domain, 0) + 1
+            queue.remove(r)
+            batch.append(r.url)
+        return batch
+
+    picks += take(n_pages)
+    reader = dict(workers=8, max_tokens=100000, timeout=15, max_age=max_age, retries=1)
+    pages = read_many(f, picks, **reader)
+    for _ in range(2):                                # a blocked or dead page gives its slot to the next result
+        short = sum(1 for p in pages if not p.ok)
+        extra = take(min(short, n_pages)) if short else []
+        if not extra:
+            break
+        n_before = len(pages)
+        pages += read_many(f, extra, **reader)
+        if all(not p.ok for p in pages[n_before:]):
+            break
+        if sum(1 for p in pages if p.ok) >= len(picks):
+            break
+    read_urls = {canonical(u) for p in pages for u in (p.url, p.final_url) if u}
+    unread = [r for r in ranked if canonical(r.url) not in read_urls]
     good = [p for p in pages if p.ok]
     failed = [p for p in pages if not p.ok]
 
@@ -118,28 +138,38 @@ def research(f: Fetcher, question: str, *, queries=None, depth: str = "standard"
         p = good[doc]
         tag = " [official]" if _OFFICIAL.search(p.domain) else ""
         via = f" [archived copy {p.snapshot[:8]}]" if p.via == "wayback" else ""
+        hit = snippets.get(canonical(p.url))
+        when = p.published or (f"{hit.date} (date from search listing)" if hit is not None and hit.date else "")
         lines.append(f"[{num}] {p.title or p.url} - {p.domain}{tag}"
-                     + (f" - {p.published}" if p.published else " - undated") + via + f"\n    {p.final_url or p.url}")
+                     + (f" - {when}" if when else " - undated") + via + f"\n    {p.final_url or p.url}")
         sources.append({"n": num, "title": p.title, "url": p.final_url or p.url, "domain": p.domain,
-                        "published": p.published, "via": p.via, "tokens": est_tokens(p.markdown)})
+                        "published": p.published or (hit.date if hit is not None else ""), "via": p.via,
+                        "tokens": est_tokens(p.markdown)})
     if taken:
         lines.append("\n## Evidence (most relevant passages; quote sources by [number])")
     for num, doc in enumerate(order, 1):
         for c in sorted((c for c in taken if c.doc == doc), key=lambda c: c.index):
             head = f" ({c.heading})" if c.heading and not c.text.startswith("#") else ""
             lines.append(f"\n### [{num}]{head}\n{c.text}")
-    qt = set(tokens(question))
+    words = {}                                        # stem -> the word as the caller wrote it
+    for w in re.findall(r"\w+", question):
+        for t in tokens(w):
+            words.setdefault(t, w.lower())
     covered = set()
     for c in taken:
-        covered |= qt & set(tokens(c.text))
-    missing = sorted(qt - covered)
+        covered |= words.keys() & set(tokens(c.text))
+    missing = sorted(words[t] for t in words.keys() - covered)
     notes = []
     if missing and taken:
         notes.append("Question terms not found in any passage: " + ", ".join(missing))
     if silent:
         notes.append("Read but nothing relevant: " + ", ".join(good[i].domain for i in silent[:8]))
     if failed:
-        notes.append("Could not read: " + "; ".join(f"{p.url} ({p.error})" for p in failed[:8]))
+        def why(p):
+            hit = snippets.get(canonical(p.url))
+            hint = f' - search snippet: "{hit.snippet[:200]}"' if hit is not None and hit.snippet else ""
+            return f"- {p.url} ({p.error}){hint}"
+        notes.append("Could not read:\n" + "\n".join(why(p) for p in failed[:8]))
     if unread:
         notes.append("Not read (lower ranked):\n" + "\n".join(
             f"- [{r.title}]({r.url})" + (f" - {r.snippet[:140]}" if r.snippet else "") for r in unread[:8]))

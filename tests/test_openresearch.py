@@ -5,6 +5,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -98,6 +99,68 @@ class TestExtract(unittest.TestCase):
         md = extract_html(html)["markdown"]
         self.assertIn("Paragraph 7", md)
         self.assertNotIn("Footer junk", md)
+
+
+    def test_utility_hidden_classes_kept(self):
+        body = "Release notes: added a feature, fixed a bug, and improved startup time for large projects. "
+        html = ("<html><body><div class='wrap'>"
+                + "".join(f"<div class='update'><span>Day {i}</span><div class='flex-1 overflow-hidden'>"
+                          f"<p>{body}Item {i}.</p></div></div>" for i in range(6))
+                + "<div class='hidden md:block'><p>Shown on wide screens, with plenty of words here.</p></div>"
+                + "<div class='hidden'><p>Really hidden text that never shows.</p></div></div></body></html>")
+        md = extract_html(html)["markdown"]
+        self.assertIn("Item 0.", md)
+        self.assertIn("Item 5.", md)
+        self.assertIn("Shown on wide screens", md)
+        self.assertNotIn("Really hidden", md)
+
+    def test_react_streamed_segments(self):
+        html = ('<html><head><title>Streamed</title></head><body><main><h1>Streamed article</h1>'
+                '<!--$?--><template id="B:0"></template><div role="status"><span>Loading</span></div><!--/$-->'
+                '</main><div hidden id="S:0"><div class="intro"><p>Intro paragraph that the server streamed '
+                'in later, with enough words to count as real content.</p></div><template id="P:1"></template>'
+                '</div><script>$RC("B:0","S:0")</script><div hidden id="S:1"><div class="article-body"><p>Body '
+                'paragraph from a nested segment, also long enough to be kept as content.</p></div></div>'
+                '</body></html>')
+        md = extract_html(html, "https://x.example/a")["markdown"]
+        self.assertIn("Intro paragraph", md)
+        self.assertIn("Body paragraph from a nested segment", md)
+        self.assertNotIn("Loading", md)
+        self.assertEqual(md.count("Intro paragraph"), 1)
+        full = extract_html(html, "https://x.example/a", mode="full")["markdown"]
+        self.assertEqual(full.count("Body paragraph"), 1)
+
+
+    def test_dates(self):
+        from openresearch.extract import norm_date
+        for raw, want in (("2017/06/12", "2017-06-12"), ("12 Jun 2017", "2017-06-12"), ("June 12, 2017", "2017-06-12"),
+                          ("2026-11-13T02:00:00Z", "2026-11-13"), ("May 2026", ""), ("13/45/2026", "")):
+            self.assertEqual(norm_date(raw), want, raw)
+        page = "<html><head>{}</head><body><main><p>" + "Words, words and more words. " * 20 + "</p>{}</main></body></html>"
+        meta = extract_html(page.format('<meta name="citation_online_date" content="2023/08/02">'
+                                        '<meta name="citation_date" content="2017/06/12">', ""))
+        self.assertEqual(meta["published"], "2017-06-12")
+        ld = '<script type="application/ld+json">[{"@type":"Article","datePublished":"3 March 2024"}]</script>'
+        self.assertEqual(extract_html(page.format(ld, ""))["published"], "2024-03-03")
+        self.assertEqual(extract_html(page.format("", ""), "https://x.example/2025/01/09/post")["published"], "2025-01-09")
+        listing = '<time datetime="2026-01-01">a</time><time datetime="2026-02-02">b</time>'
+        self.assertEqual(extract_html(page.format("", listing))["published"], "")       # a listing has no one date
+
+    def test_markdown_cleanups(self):
+        para = "<p>Real paragraph text with enough words, commas, and substance to be kept as content.</p>"
+        toc = ("<ul><li><a href='#one'>Section one</a></li><li><a href='#two'>Section two</a></li>"
+               "<li><a href='#three'>Section three</a></li></ul>")
+        html = ("<html><body><main>" + toc + "<h2>Section one<a class='headerlink' href='#one'>¶</a></h2>" + para * 3
+                + "<dl><dt>setting<a href='#setting'>¶</a></dt><dd>What it does.</dd></dl>"
+                + "<ul><li>A promo line long enough to matter, shown for desktop and for mobile</li></ul>" * 2
+                + "<table><tr><td>1.</td><td></td><td>First story</td></tr><tr><td>2.</td><td></td>"
+                  "<td>Second story</td></tr></table></main></body></html>")
+        md = extract_html(html)["markdown"]
+        self.assertNotIn("Section three", md)                # jump-link table of contents
+        self.assertNotIn("¶", md)
+        self.assertIn("## Section one\n", md)
+        self.assertEqual(md.count("A promo line"), 1)        # back-to-back duplicate block
+        self.assertIn("| 1. | First story |\n| --- | --- |\n| 2. | Second story |", md)   # spacer column gone
 
 
 class TestRank(unittest.TestCase):
@@ -211,6 +274,16 @@ class TestFetch(Base):
         self.assertEqual((p.via, p.snapshot[:8]), ("wayback", "20250101"))
         self.assertIn("Internet Archive copy from 20250101", p.render())
 
+    def test_blocked_pages_say_why_and_fail_fast(self):
+        p = read(self.f, self.base + "/challenge")
+        self.assertIn("HTTP 403", p.error)
+        self.assertIn("browser check", p.error)
+        r = self.f.fetch(self.base + "/busy")
+        self.assertIn("rate limited", r.error)
+        self.assertEqual(self.site.hits["/busy"], 1)          # Retry-After: 1 hour is not worth waiting for
+        self.f.fetch(self.base + "/down", retries=0)
+        self.assertEqual(self.site.hits["/down"], 1)
+
     def test_read_many_keeps_order(self):
         pages = read_many(self.f, [self.base + "/docs/b", self.base + "/missing", self.base + "/docs/a"])
         self.assertEqual([p.title for p in pages], ["Docs: Configure", "", "Docs: Install"])
@@ -224,6 +297,13 @@ class TestCrawl(Base):
         self.assertIn(self.base + "/article", urls)
         self.assertEqual(next(i for i in items if i["url"].endswith("/article"))["lastmod"], "2026-01-01")
         self.assertFalse(any("elsewhere" in u or u.endswith(".png") for u in urls))
+
+    def test_map_explores_when_start_page_lacks_the_answer(self):
+        with mock.patch("openresearch.crawl.sitemap_urls", return_value=[]):
+            urls = [i["url"] for i in map_site(self.f, self.base + "/nomap/", search="html parser")]
+            self.assertEqual(urls[0], self.base + "/nomap/library/html.parser")    # found one level down
+            only_start = [i["url"] for i in map_site(self.f, self.base + "/nomap/", search="html parser", explore=0)]
+        self.assertNotIn(self.base + "/nomap/library/html.parser", only_start)
 
     def test_crawl_scope_and_robots(self):
         pages = crawl(self.f, self.base + "/docs/a", max_pages=20, delay=0)
@@ -245,6 +325,15 @@ class TestCrawl(Base):
 
 
 class TestStructured(unittest.TestCase):
+    def test_table_spans(self):
+        html = ("<table><tr><th rowspan='2'>Name</th><th colspan='2'>Height</th><th rowspan='2'>City</th></tr>"
+                "<tr><th>m</th><th>ft</th></tr>"
+                "<tr><td>Alpha</td><td>828</td><td>2,717</td><td rowspan='2'>Dubai</td></tr>"
+                "<tr><td>Beta</td><td>400</td><td>1,312</td></tr></table>")
+        t = import_module("openresearch.structured").extract(html, want=("tables",))["tables"][0]
+        self.assertEqual(t["header"], ["Name", "Height m", "Height ft", "City"])
+        self.assertEqual(t["records"][1], {"Name": "Beta", "Height m": "400", "Height ft": "1,312", "City": "Dubai"})
+
     def test_extract(self):
         d = extract(ARTICLE, "http://news.example/article", {
             "headline": "article h1", "first_link": "article a::attr(href)",
@@ -284,6 +373,27 @@ class TestSearch(Base):
         m = S.parse_mojeek(MOJEEK)
         self.assertEqual((m[0].title, m[0].url, m[0].snippet), ("Mojeek title", "https://m.example/a", "Mojeek snippet"))
 
+    def test_bing_news_feed(self):
+        feed = (b'<rss version="2.0" xmlns:News="https://www.bing.com/news/search"><channel>'
+                b'<item><title>Widget sales &amp; profits rise</title><link>http://www.bing.com/news/apiclick.aspx?'
+                b'ref=FexRss&amp;url=https%3a%2f%2fnews.example%2fwidgets%3fa%3d1&amp;c=1</link>'
+                b'<description>Sales rose.</description><pubDate>Thu, 12 Nov 2026 12:17:00 GMT</pubDate>'
+                b'<News:Source>Example News</News:Source></item>'
+                b'<item><title>Old story</title><link>https://old.example/x</link>'
+                b'<pubDate>Mon, 01 Jan 2001 00:00:00 GMT</pubDate></item></channel></rss>')
+        rows = S.parse_bingnews(feed)
+        self.assertEqual((rows[0].title, rows[0].url, rows[0].date, rows[0].extra),
+                         ("Widget sales & profits rise", "https://news.example/widgets?a=1", "2026-11-12", "Example News"))
+        self.assertEqual(len(rows), 2)
+        self.assertNotIn("Old story", [r.title for r in S.parse_bingnews(feed, days=7)])
+        with self.assertRaises(RuntimeError):
+            S.parse_bingnews(b"<html>not a feed")
+        self.assertEqual(S.engines_for(self.f, "news")[0], "bingnews")
+
+    def test_mojeek_is_opt_in(self):
+        self.assertNotIn("mojeek", S.engines_for(self.f, "web"))
+        self.assertEqual(S.engines_for(self.f, "web", ["mojeek"]), ["mojeek"])
+
     def _fake_engines(self):
         base = self.base
 
@@ -301,6 +411,14 @@ class TestSearch(Base):
             raise RuntimeError("engine down")
 
         return {"one": one, "two": two, "broken": broken}
+
+    def test_engine_errors_name_the_cause(self):
+        with self.assertRaises(RuntimeError) as cm:
+            S._json(self.f, self.base + "/busy")
+        self.assertIn("429", str(cm.exception))
+        with self.assertRaises(RuntimeError) as cm:
+            S._json(self.f, self.base + "/article")
+        self.assertIn("not JSON", str(cm.exception))
 
     def test_fusion(self):
         old = dict(S.ENGINES)
@@ -334,9 +452,33 @@ class TestSearch(Base):
         self.assertIn("## Sources", text)
         self.assertIn("[1] Docs: Configure", text)                     # best passage's source is numbered first
         self.assertIn("broken FAILED", text)
-        self.assertIn("Could not read: https://spam.example/x", text)
+        self.assertIn("Could not read:\n- https://spam.example/x", text)
         self.assertNotIn("Cats sleep", text)                           # irrelevant page contributes nothing
         self.assertLess(rank.est_tokens(text), 3200)
+
+
+    def test_research_replaces_failed_pages(self):
+        base, dead = self.base, "http://127.0.0.1:1/gone"
+
+        def flaky(f, q, n, o):
+            return [S.Result("Gone", dead, "The widget frequency is 42 hertz by default.", "flaky", "2026-01-02"),
+                    S.Result("Configure", base + "/docs/b", "", "flaky", "2026-02-03")]
+
+        old = dict(S.ENGINES)
+        S.ENGINES["flaky"] = flaky
+        self.f.cfg.engines = ["flaky"]
+        self.f.cfg.retries = 0
+        try:
+            out = research(self.f, "widget frequency", queries=["widget frequency"], max_pages=1)
+        finally:
+            S.ENGINES.clear()
+            S.ENGINES.update(old)
+        text = out["text"]
+        self.assertIn("42 hertz in the settings file", text)            # the next result took the dead page's slot
+        self.assertIn("2026-02-03 (date from search listing)", text)    # undated page borrows the listing's date
+        self.assertIn(f"- {dead} (", text)
+        self.assertIn('search snippet: "The widget frequency is 42 hertz by default."', text)
+        self.assertEqual(out["unread"], [])
 
 
 class TestMcp(Base):
@@ -352,6 +494,7 @@ class TestMcp(Base):
         self.assertEqual({t["name"] for t in tools}, {"research", "search", "fetch", "crawl", "map", "extract"})
         for t in tools:
             self.assertEqual(t["inputSchema"]["type"], "object")
+            self.assertTrue(t["annotations"]["readOnlyHint"])
             json.dumps(t)
         self.assertEqual(self.srv.handle({"jsonrpc": "2.0", "id": 3, "method": "nope"})["error"]["code"], -32601)
 

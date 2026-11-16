@@ -136,6 +136,23 @@ class Site:
                 if path == "/latin1":
                     return self._send(200, "<html><body><main><p>caf\xe9 cr\xe8me</p></main></body></html>".encode("latin-1"),
                                       "text/html; charset=iso-8859-1")
+                if path.startswith("/nomap/"):
+                    nomap = {
+                        "/nomap/": "<html><body><a href='/nomap/about'>About us</a> <a href='/nomap/library/'>Library "
+                                   "reference</a> <a href='/nomap/blog'>Blog</a></body></html>",
+                        "/nomap/library/": "<html><body><a href='/nomap/library/json'>json</a> "
+                                           "<a href='/nomap/library/html.parser'>html.parser - parse HTML</a></body></html>",
+                    }
+                    if path in nomap:
+                        return self._send(200, nomap[path])
+                    return self._send(200, "<html><body><p>Leaf page.</p></body></html>")
+                if path == "/challenge":
+                    return self._send(403, "<html><head><title>Just a moment...</title></head><body></body></html>",
+                                      extra={"cf-mitigated": "challenge"})
+                if path == "/busy":
+                    return self._send(429, "slow down", extra={"Retry-After": "3600"})
+                if path == "/down":
+                    return self._send(503, "down")
                 self._send(404, "<html><body>not found</body></html>")
 
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), H)

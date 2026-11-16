@@ -85,7 +85,7 @@ class Converter:
         if t == "a":
             text = _WS.sub(" ", inner).strip()
             href = self._url(node.get("href"))
-            if not text:
+            if not text or text in ("¶", "#", "§", "🔗"):       # empty, or a heading's permalink marker
                 return ""
             if self.links == "none" or not href:
                 return inner
@@ -177,33 +177,72 @@ class Converter:
         return ["\n".join(items)] if items else []
 
     def table_rows(self, table: Node) -> list:
-        """Rows of a table as lists of cell strings (nested tables excluded)."""
-        rows = []
+        """Rows of a table as lists of cell strings (nested tables excluded).
+
+        Cells that span rows or columns are repeated into every position they cover, so each row
+        lines up with the header, and a header that takes several rows is merged into one."""
+        rows, head_rows, carry = [], [], {}        # carry: column -> [rows still to fill, text]
 
         def collect(n):
             for ch in n.children:
                 if ch.tag == "tr":
-                    cells = []
-                    for td in ch.children:
-                        if td.tag in ("td", "th"):
-                            text = _tidy(" ".join(self.blocks(td))).replace("\n", " ")
+                    cells, col, tds = [], 0, [td for td in ch.children if td.tag in ("td", "th")]
+
+                    def fill():
+                        nonlocal col
+                        while col in carry:
+                            cells.append(carry[col][1])
+                            carry[col][0] -= 1
+                            if carry[col][0] <= 0:
+                                del carry[col]
+                            col += 1
+
+                    for td in tds:
+                        fill()
+                        text = _tidy(" ".join(self.blocks(td))).replace("\n", " ")
+                        try:
+                            span = max(1, min(int(td.get("colspan") or 1), 20))
+                        except ValueError:
+                            span = 1
+                        try:
+                            down = max(1, min(int(td.get("rowspan") or 1), 200))
+                        except ValueError:
+                            down = 1
+                        for _ in range(span):
                             cells.append(text)
-                            try:
-                                span = min(int(td.get("colspan") or 1), 20)
-                            except ValueError:
-                                span = 1
-                            cells.extend([""] * (span - 1))
+                            if down > 1:
+                                carry[col] = [down - 1, text]
+                            col += 1
+                    fill()
+                    head_rows.append(bool(tds) and all(td.tag == "th" for td in tds))
                     rows.append(cells)
                 elif ch.tag in ("thead", "tbody", "tfoot"):
                     collect(ch)
 
         collect(table)
+        depth = 0
+        while depth < len(rows) and head_rows[depth]:
+            depth += 1
+        if 1 < depth < len(rows) and depth <= 4:
+            width = max(len(r) for r in rows[:depth])
+            merged = []
+            for i in range(width):
+                parts = []
+                for r in rows[:depth]:
+                    if i < len(r) and r[i] and r[i] not in parts:
+                        parts.append(r[i])
+                merged.append(" ".join(parts))
+            rows = [merged] + rows[depth:]
         return rows
 
     def _table(self, node: Node) -> list:
         nested = any(n.tag == "table" for n in node.elements())
         rows = [] if nested else [r for r in self.table_rows(node) if any(r)]
         ncols = max((len(r) for r in rows), default=0)
+        rows = [r + [""] * (ncols - len(r)) for r in rows]
+        keep = [i for i in range(ncols) if any(r[i] for r in rows)]      # spacer columns carry nothing
+        if len(keep) < ncols:
+            rows, ncols = [[r[i] for i in keep] for r in rows], len(keep)
         if nested or ncols < 2 or any(len(c) > 600 for r in rows for c in r):
             out = []
             for n in node.children:      # layout table: just read it top to bottom
@@ -224,7 +263,13 @@ class Converter:
         return out
 
     def convert(self, node: Node) -> str:
-        md = "\n\n".join(b for b in self.blocks(node) if b.strip())
+        blocks, last = [], None
+        for b in self.blocks(node):
+            if not b.strip() or (b == last and len(b) > 40):     # the same block twice in a row is a
+                continue                                         # desktop/mobile duplicate, not content
+            blocks.append(b)
+            last = b
+        md = "\n\n".join(blocks)
         md = re.sub(r"\n{3,}", "\n\n", md)
         md = re.sub(r"[ \t]+\n", "\n", md)
         return md.strip()

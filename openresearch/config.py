@@ -35,6 +35,7 @@ class Config:
     searxng_url: str = ""
     brave_api_key: str = ""
     github_token: str = ""
+    openalex_api_key: str = ""
 
     @classmethod
     def load(cls, path: str | None = None) -> "Config":

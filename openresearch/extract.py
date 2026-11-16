@@ -19,11 +19,114 @@ _NEG = re.compile(
     r"visually-hidden|screen-reader-text|navbox|mw-editsection|toc|noprint|paywall)(?:$|[\s_-])",
     re.I)
 _HIDDEN_STYLE = re.compile(r"display\s*:\s*none|visibility\s*:\s*hidden", re.I)
+# Utility classes that contain "hidden" but leave content visible (overflow-hidden clips, it doesn't hide).
+_NOT_HIDING = re.compile(r"^(?:overflow|text|truncate)(?:-[xy])?-hidden$|^[\w-]+:[\w-]*hidden$", re.I)
+# A responsive "display" class next to a plain `hidden` means visible at some screen width (Tailwind etc.).
+_SHOWN_AT = re.compile(r"^[\w-]+:(?:block|flex|grid|inline|inline-block|inline-flex|inline-grid|table|contents)$")
+
+
+def _signature(n: Node) -> str:
+    """id + class for the boilerplate check, minus classes that only look like hiding."""
+    classes = [c for c in n.get("class").split() if not _NOT_HIDING.match(c)]
+    if any(_SHOWN_AT.match(c) for c in classes):
+        classes = [c for c in classes if c.lower() != "hidden"]
+    return (n.get("id") + " " + " ".join(classes)).strip()
+
+
+# React streaming SSR: content arrives in <div hidden id="S:n"> segments that a script moves into
+# <template id="P:n"> placeholders and <!--$?--><template id="B:n">fallback<!--/$--> boundaries.
+_SEGMENT = re.compile(r'<div hidden(?:="")? id="S:(\d+)">', re.I)
+_DIV_TAG = re.compile(r"<div\b|</div\s*>", re.I)
+_BOUNDARY_SWAP = re.compile(r'\$RC\(\s*"B:(\d+)"\s*,\s*"S:(\d+)"\s*\)')
+_SUSPENSE_MARK = re.compile(r"<!--\$[?!]?-->|<!--/\$-->")
+
+
+def _inline_react_segments(html: str) -> str:
+    """Do what React's inline scripts would: put streamed segments where they belong."""
+    if "hidden" not in html or not _SEGMENT.search(html):
+        return html
+    segments, spans = {}, []
+    for m in _SEGMENT.finditer(html):
+        depth, end = 0, None
+        for t in _DIV_TAG.finditer(html, m.start()):
+            depth += -1 if t.group().startswith("</") else 1
+            if depth == 0:
+                end = t
+                break
+        if end is None:
+            continue
+        segments[m.group(1)] = html[m.end():end.start()]
+        spans.append((m.start(), end.end()))
+    if not segments:
+        return html
+    boundaries = {b: s for b, s in _BOUNDARY_SWAP.findall(html) if s in segments}
+    for a, b in reversed(spans):                       # drop the hidden copies; they get inlined below
+        html = html[:a] + html[b:]
+
+    def fill(text: str, seen: frozenset) -> str:
+        def placeholder(m):
+            n = m.group(1)
+            return fill(segments[n], seen | {n}) if n in segments and n not in seen else ""
+        text = re.sub(r'<template id="P:(\d+)"></template>', placeholder, text)
+        out, pos = [], 0
+        for m in re.finditer(r'<!--\$\?--><template id="B:(\d+)"></template>', text):
+            seg = boundaries.get(m.group(1))
+            if seg is None or seg in seen:
+                continue
+            depth, close = 1, None                       # skip the fallback up to the matching <!--/$-->
+            for t in _SUSPENSE_MARK.finditer(text, m.end()):
+                depth += -1 if t.group() == "<!--/$-->" else 1
+                if depth == 0:
+                    close = t
+                    break
+            if close is None or m.start() < pos:
+                continue
+            out += [text[pos:m.start()], fill(segments[seg], seen | {seg})]
+            pos = close.end()
+        return "".join(out) + text[pos:]
+
+    return fill(html, frozenset())
 _SEMANTIC = ("article, main, [role=main], [itemprop=articleBody], #content, #main-content, "
              "#main, .post-content, .entry-content, .article-body, .article-content, "
              "#mw-content-text, .markdown-body, .content")
 _PROTECTED = frozenset("html body article main #document".split())
 _DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
+_MONTHS = {m: i for i, m in enumerate("jan feb mar apr may jun jul aug sep oct nov dec".split(), 1)}
+_DATE_SLASH = re.compile(r"\b((?:19|20)\d{2})[/.](\d{1,2})[/.](\d{1,2})\b")
+_DATE_DMY = re.compile(r"\b(\d{1,2})(?:st|nd|rd|th)?\s+([A-Za-z]{3,9})\.?,?\s+((?:19|20)\d{2})\b")
+_DATE_MDY = re.compile(r"\b([A-Za-z]{3,9})\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+((?:19|20)\d{2})\b")
+_URL_DATE = re.compile(r"/((?:19|20)\d{2})/(\d{1,2})/(\d{1,2})(?:/|$)")
+_PUBLISHED_KEYS = ("article:published_time", "datepublished", "date", "dc.date", "dc.date.issued", "dcterms.issued",
+                   "dcterms.created", "dcterms.date", "citation_publication_date", "citation_date",
+                   "citation_online_date", "parsely-pub-date", "pubdate", "publish-date", "publication_date",
+                   "sailthru.date", "og:published_time", "article.published", "datecreated", "uploaddate")
+_MODIFIED_KEYS = ("article:modified_time", "datemodified", "last-modified", "og:updated_time", "dcterms.modified",
+                  "dc.date.modified")
+
+
+def norm_date(s: str) -> str:
+    """Any common date spelling -> YYYY-MM-DD, or '' when there is no full date in it."""
+    s = s or ""
+    m = _DATE.search(s)
+    if m:
+        return m.group(0)
+    y = mo = d = 0
+    m = _DATE_SLASH.search(s)
+    if m:
+        y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    else:
+        m = _DATE_DMY.search(s)
+        if m and m.group(2)[:3].lower() in _MONTHS:
+            y, mo, d = int(m.group(3)), _MONTHS[m.group(2)[:3].lower()], int(m.group(1))
+        else:
+            m = _DATE_MDY.search(s)
+            if m and m.group(1)[:3].lower() in _MONTHS:
+                y, mo, d = int(m.group(3)), _MONTHS[m.group(1)[:3].lower()], int(m.group(2))
+    return f"{y:04d}-{mo:02d}-{d:02d}" if y and 1 <= mo <= 12 and 1 <= d <= 31 else ""
+
+
+def _first(metas: dict, keys) -> str:
+    return next((metas[k] for k in keys if metas.get(k)), "")
 
 
 def _text_lens(root: Node) -> dict:
@@ -40,6 +143,14 @@ def _text_lens(root: Node) -> dict:
 
 def _link_len(node: Node) -> int:
     return sum(len(a.text()) for a in node.find_all("a"))
+
+
+def _is_page_toc(lst: Node) -> bool:
+    """A list of jump links to headings on the same page: pure navigation, the headings follow anyway."""
+    links = lst.find_all("a")
+    if len(links) < 3 or any(not a.get("href").startswith("#") for a in links):
+        return False
+    return sum(len(a.text()) for a in links) >= 0.8 * max(len(lst.text()), 1)
 
 
 def _strip(root: Node, main_only: bool):
@@ -72,8 +183,10 @@ def _strip(root: Node, main_only: bool):
             drop = True
         elif n.get("style") and _HIDDEN_STYLE.search(n.get("style")):
             drop = True
+        elif n.tag in ("ul", "ol") and _is_page_toc(n):
+            drop = True
         else:
-            sig = (n.get("id") + " " + n.get("class")).strip()
+            sig = _signature(n)
             if sig and _NEG.search(sig) and lens[id(n)] < 0.4 * total:
                 drop = True
         if drop:
@@ -131,7 +244,7 @@ def _pick_main(body: Node) -> Node:
     return wrapper
 
 
-def _meta(root: Node) -> dict:
+def _meta(root: Node, url: str = "") -> dict:
     metas = {}
     for m in root.find_all("meta"):
         key = (m.get("property") or m.get("name") or m.get("itemprop")).lower()
@@ -148,30 +261,43 @@ def _meta(root: Node) -> dict:
     out = {
         "title": metas.get("og:title") or (title_node.text() if title_node else "") or (h1.text() if h1 else ""),
         "description": metas.get("description") or metas.get("og:description") or "",
-        "author": metas.get("author") or metas.get("article:author") or metas.get("parsely-author") or "",
-        "published": (metas.get("article:published_time") or metas.get("datepublished") or metas.get("date")
-                      or metas.get("dc.date") or metas.get("parsely-pub-date") or metas.get("pubdate") or ""),
-        "modified": metas.get("article:modified_time") or metas.get("datemodified") or metas.get("last-modified") or "",
+        "author": (metas.get("author") or metas.get("article:author") or metas.get("parsely-author")
+                   or metas.get("citation_author") or metas.get("dc.creator") or ""),
+        "published": _first(metas, _PUBLISHED_KEYS),
+        "modified": _first(metas, _MODIFIED_KEYS),
         "site": metas.get("og:site_name") or "",
         "lang": html.get("lang") if html else "",
         "canonical": canonical,
     }
+    items = []
     for ld in jsonld(root):
-        for item in (ld.get("@graph") if isinstance(ld, dict) and isinstance(ld.get("@graph"), list) else [ld]):
-            if not isinstance(item, dict):
-                continue
-            out["published"] = out["published"] or str(item.get("datePublished") or "")
-            out["modified"] = out["modified"] or str(item.get("dateModified") or "")
-            if not out["author"]:
-                a = item.get("author")
-                a = a[0] if isinstance(a, list) and a else a
-                out["author"] = a.get("name", "") if isinstance(a, dict) else (a if isinstance(a, str) else "")
-    if not out["published"]:
-        t = next((t for t in root.find_all("time") if t.get("datetime")), None)
-        out["published"] = t.get("datetime") if t else ""
+        for top in (ld if isinstance(ld, list) else [ld]):
+            items += top["@graph"] if isinstance(top, dict) and isinstance(top.get("@graph"), list) else [top]
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        out["published"] = out["published"] or str(
+            item.get("datePublished") or item.get("uploadDate") or item.get("dateCreated") or "")
+        out["modified"] = out["modified"] or str(item.get("dateModified") or "")
+        if not out["author"]:
+            a = item.get("author")
+            a = a[0] if isinstance(a, list) and a else a
+            out["author"] = a.get("name", "") if isinstance(a, dict) else (a if isinstance(a, str) else "")
+    if not norm_date(out["published"]):
+        # one <time> is the article's date; several are a listing (a blog index, a feed of posts)
+        times = {norm_date(t.get("datetime")) for t in root.find_all("time") if t.get("datetime")} - {""}
+        m = _URL_DATE.search(url)
+        marked = next((t.get("datetime") for t in root.find_all("time") if t.get("datetime") and (
+            "pubdate" in t.attrs or "datepublished" in t.get("itemprop").lower()
+            or re.search(r"publish|posted|entry-date", t.get("class"), re.I))), "")
+        if len(times) == 1:
+            out["published"] = times.pop()
+        elif marked:
+            out["published"] = marked
+        elif m:
+            out["published"] = norm_date("/".join(m.groups()))
     for k in ("published", "modified"):
-        m = _DATE.search(out[k] or "")
-        out[k] = m.group(0) if m else (out[k] or "")[:40]
+        out[k] = norm_date(out[k])
     return {k: (v or "").strip() if isinstance(v, str) else "" for k, v in out.items()}
 
 
@@ -213,8 +339,8 @@ def links(root: Node, base_url: str) -> list:
 def extract_html(html: str, url: str = "", mode: str = "main", link_style: str = "inline",
                  images: bool = False) -> dict:
     """HTML -> {markdown, title, ..., links}. mode: 'main' (article only) or 'full' (whole page)."""
-    root = parse(html)
-    meta = _meta(root)
+    root = parse(_inline_react_segments(html))
+    meta = _meta(root, url)
     all_links = links(root, url)
     body = root.find("body") or root
     _strip(root, main_only=(mode != "full"))

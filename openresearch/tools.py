@@ -81,6 +81,9 @@ TOOLS = [
             "links": _s("inline keeps hyperlinks; none drops them to save tokens",
                         enum=["inline", "none"], default="inline"),
             "fresh": {"type": "boolean", "description": "Bypass the cache.", "default": False},
+            "render": {"type": "boolean", "default": False, "description":
+                       "Load the page in a headless browser first (needs Playwright). Use it when a page comes "
+                       "back empty or as a loading placeholder."},
         }},
     },
     {
@@ -104,13 +107,16 @@ TOOLS = [
     {
         "name": "map",
         "description": (
-            "List a site's URLs fast (sitemaps plus links on the start page) without reading the pages. With "
+            "List a site's URLs fast (sitemaps, plus links on a few pages when there is no sitemap) without "
+            "reading the pages. With "
             "`search`, URLs are ordered by relevance. Use it to find the right page before `fetch`."),
         "inputSchema": {"type": "object", "required": ["url"], "properties": {
             "url": _s("Any URL on the site."),
             "search": _s("Order URLs by relevance to these words."),
             "limit": _i("Maximum URLs to return.", 100),
             "subdomains": {"type": "boolean", "description": "Include subdomains.", "default": False},
+            "explore": _i("When the sitemap is missing or thin, open up to this many pages to find more links "
+                          "(0 = start page only).", 12, minimum=0, maximum=50),
         }},
     },
     {
@@ -130,6 +136,14 @@ TOOLS = [
         }},
     },
 ]
+
+
+_TITLES = {"research": "Research a question", "search": "Search the web", "fetch": "Read web pages",
+           "crawl": "Crawl a website", "map": "List a site's URLs", "extract": "Extract structured data"}
+for _t in TOOLS:      # every tool only reads the public web: clients may run them without a confirmation step
+    _t["title"] = _TITLES[_t["name"]]
+    _t["annotations"] = {"title": _TITLES[_t["name"]], "readOnlyHint": True, "destructiveHint": False,
+                         "idempotentHint": True, "openWorldHint": True}
 
 
 def call(f: Fetcher, name: str, a: dict) -> str:
@@ -153,7 +167,7 @@ def call(f: Fetcher, name: str, a: dict) -> str:
             raise ValueError("fetch needs at least one URL in `urls`")
         kw = dict(query=a.get("query", ""), max_tokens=int(a.get("max_tokens", 6000)),
                   offset=int(a.get("offset") or 0), mode=a.get("mode", "main"), links=a.get("links", "inline"),
-                  max_age=0 if a.get("fresh") else None)
+                  max_age=0 if a.get("fresh") else None, render="always" if a.get("render") else None)
         pages = read_many(f, urls[:20], **kw)
         return "\n\n---\n\n".join(p.render() for p in pages)
     if name == "crawl":
@@ -163,7 +177,8 @@ def call(f: Fetcher, name: str, a: dict) -> str:
                       use_sitemap=bool(a.get("use_sitemap")))
         return format_crawl(pages, int(a.get("max_tokens", 12000)))
     if name == "map":
-        items = map_site(f, a["url"], int(a.get("limit", 100)), a.get("search", ""), bool(a.get("subdomains")))
+        items = map_site(f, a["url"], int(a.get("limit", 100)), a.get("search", ""), bool(a.get("subdomains")),
+                         explore=min(int(a.get("explore", 12)), 50))
         if not items:
             return "No URLs found (the site may block crawlers or have no sitemap)."
         return f"{len(items)} URLs\n" + "\n".join(

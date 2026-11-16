@@ -13,6 +13,7 @@ from .page import domain_of
 
 _TRACKING = re.compile(r"^(utm_\w+|fbclid|gclid|msclkid|mc_cid|mc_eid|igshid|ref_src|_hsenc|_hsmi|yclid)$")
 _TIME = {"day": "d", "week": "w", "month": "m", "year": "y", "d": "d", "w": "w", "m": "m", "y": "y"}
+_DAYS = {"day": 1, "week": 7, "month": 31, "year": 366, "d": 1, "w": 7, "m": 31, "y": 366}
 _SEARCH_TTL = 900
 
 
@@ -57,6 +58,19 @@ def _clean(s) -> str:
 
 
 # ------------------------------------------------------------------ engines
+
+def _json(f: Fetcher, url: str, **kw):
+    """JSON from a search API. Raises with the real reason (rate limit, HTTP status) so the report shows it,
+    and gives up quickly: a slow engine must not hold the others back."""
+    kw.setdefault("timeout", 10)
+    r = f.fetch(url, robots=False, retries=1, **kw)
+    if not r.ok:
+        raise RuntimeError(r.error or f"HTTP {r.status}")
+    try:
+        return r.json()
+    except ValueError:
+        raise RuntimeError("reply was not JSON") from None
+
 
 def _ddg_unwrap(href: str) -> str:
     if "duckduckgo.com/y.js" in href:
@@ -125,6 +139,9 @@ def ddg(f: Fetcher, q: str, n: int, o: dict) -> list:
         r2 = f.fetch("https://lite.duckduckgo.com/lite/?" + urlencode(params), robots=False, max_age=_SEARCH_TTL)
         out = parse_ddg_lite(r2.text) if r2.ok else []
         if not out and not r.ok and not r2.ok:
+            if 202 in (r.status, r2.status):
+                raise RuntimeError("DuckDuckGo is throttling this network (HTTP 202); `pip install ddgs` adds "
+                                   "more backends, or configure Brave or SearXNG")
             raise RuntimeError(r.error or r2.error or "no results")
     return out[:n]
 
@@ -141,8 +158,11 @@ def parse_mojeek(html: str) -> list:
 
 
 def mojeek(f, q, n, o):
+    """Opt-in only (engines=["mojeek"]): Mojeek refuses many automated clients with HTTP 403."""
     r = f.fetch("https://www.mojeek.com/search?" + urlencode({"q": q}), robots=False, max_age=_SEARCH_TTL)
     if not r.ok:
+        if r.status == 403:
+            raise RuntimeError("HTTP 403: Mojeek refused this client")
         raise RuntimeError(r.error)
     return parse_mojeek(r.text)[:n]
 
@@ -150,11 +170,9 @@ def mojeek(f, q, n, o):
 def wikipedia(f, q, n, o):
     lang = (o.get("lang") or "en").split("-")[0]
     q = re.sub(r"\bsite:\S+", "", q).strip()
-    data = f.get_json(f"https://{lang}.wikipedia.org/w/api.php?" + urlencode(
+    data = _json(f, f"https://{lang}.wikipedia.org/w/api.php?" + urlencode(
         {"action": "query", "list": "search", "srsearch": q, "srlimit": min(n, 10), "format": "json"}),
         max_age=_SEARCH_TTL)
-    if data is None:
-        raise RuntimeError("request failed")
     return [Result(h["title"], f"https://{lang}.wikipedia.org/wiki/" + quote(h["title"].replace(" ", "_")),
                    _clean(h.get("snippet")), "wikipedia", (h.get("timestamp") or "")[:10])
             for h in data.get("query", {}).get("search", [])]
@@ -163,29 +181,34 @@ def wikipedia(f, q, n, o):
 def brave(f, q, n, o):
     if not f.cfg.brave_api_key:
         raise RuntimeError("no BRAVE_API_KEY set")
-    data = f.get_json("https://api.search.brave.com/res/v1/web/search?" + urlencode({"q": q, "count": min(n, 20)}),
-                      headers={"X-Subscription-Token": f.cfg.brave_api_key, "Accept": "application/json"},
-                      max_age=_SEARCH_TTL)
-    if data is None:
-        raise RuntimeError("request failed")
+    params = {"q": q, "count": min(n, 20)}
+    if _TIME.get(o.get("time")):
+        params["freshness"] = "p" + _TIME[o["time"]]                     # pd, pw, pm, py
+    data = _json(f, "https://api.search.brave.com/res/v1/web/search?" + urlencode(params),
+                 headers={"X-Subscription-Token": f.cfg.brave_api_key, "Accept": "application/json"},
+                 max_age=_SEARCH_TTL)
     return [Result(_clean(r.get("title")), r.get("url", ""), _clean(r.get("description")), "brave",
-                   r.get("page_age", "")[:10]) for r in (data.get("web") or {}).get("results", [])]
+                   (r.get("page_age") or "")[:10]) for r in (data.get("web") or {}).get("results", [])]
 
 
 def searxng(f, q, n, o):
     if not f.cfg.searxng_url:
         raise RuntimeError("no searxng_url configured")
-    data = f.get_json(f.cfg.searxng_url.rstrip("/") + "/search?" + urlencode({"q": q, "format": "json"}),
-                      max_age=_SEARCH_TTL)
-    if data is None:
-        raise RuntimeError("request failed")
+    params = {"q": q, "format": "json"}
+    if o.get("time") in ("day", "week", "month", "year"):
+        params["time_range"] = o["time"]
+    data = _json(f, f.cfg.searxng_url.rstrip("/") + "/search?" + urlencode(params), max_age=_SEARCH_TTL)
     return [Result(r.get("title", ""), r.get("url", ""), r.get("content", ""), "searxng",
                    (r.get("publishedDate") or "")[:10]) for r in data.get("results", [])[:n]]
 
 
 def arxiv(f, q, n, o):
+    # "all:a b c" matches any one word; every word must be required for relevant results
+    words = [w for w in re.findall(r"[\w-]+", re.sub(r"\bsite:\S+", "", q)) if len(w) > 1][:10]
+    query = " AND ".join("all:" + w for w in words) or "all:" + q
     r = f.fetch("https://export.arxiv.org/api/query?" + urlencode(
-        {"search_query": "all:" + q, "max_results": n, "sortBy": "relevance"}), robots=False, max_age=_SEARCH_TTL)
+        {"search_query": query, "max_results": n, "sortBy": "relevance"}), robots=False, max_age=_SEARCH_TTL,
+        timeout=10, retries=1)
     if not r.ok:
         raise RuntimeError(r.error)
     ns = {"a": "http://www.w3.org/2005/Atom"}
@@ -200,10 +223,10 @@ def arxiv(f, q, n, o):
 
 
 def openalex(f, q, n, o):
-    data = f.get_json("https://api.openalex.org/works?" + urlencode({"search": q, "per-page": min(n, 25)}),
-                      max_age=_SEARCH_TTL)
-    if data is None:
-        raise RuntimeError("request failed")
+    params = {"search": q, "per-page": min(n, 25)}
+    if f.cfg.openalex_api_key:               # keyless requests share one small daily budget per IP address
+        params["api_key"] = f.cfg.openalex_api_key
+    data = _json(f, "https://api.openalex.org/works?" + urlencode(params), max_age=_SEARCH_TTL)
     out = []
     for w in data.get("results", []):
         inv = w.get("abstract_inverted_index") or {}
@@ -218,10 +241,8 @@ def openalex(f, q, n, o):
 
 
 def crossref(f, q, n, o):
-    data = f.get_json("https://api.crossref.org/works?" + urlencode({"query": q, "rows": min(n, 20)}),
-                      max_age=_SEARCH_TTL)
-    if data is None:
-        raise RuntimeError("request failed")
+    data = _json(f, "https://api.crossref.org/works?" + urlencode({"query": q, "rows": min(n, 20)}),
+                 max_age=_SEARCH_TTL)
     out = []
     for w in data.get("message", {}).get("items", []):
         parts = ((w.get("issued") or {}).get("date-parts") or [[]])[0]
@@ -236,10 +257,12 @@ def crossref(f, q, n, o):
 
 
 def hackernews(f, q, n, o):
-    data = f.get_json("https://hn.algolia.com/api/v1/search?" + urlencode({"query": q, "hitsPerPage": min(n, 30)}),
-                      max_age=_SEARCH_TTL)
-    if data is None:
-        raise RuntimeError("request failed")
+    params = {"query": q, "hitsPerPage": min(n, 30)}
+    days = _DAYS.get(o.get("time"))
+    if days:
+        import time as _time
+        params["numericFilters"] = f"created_at_i>{int(_time.time()) - days * 86400}"
+    data = _json(f, "https://hn.algolia.com/api/v1/search?" + urlencode(params), max_age=_SEARCH_TTL)
     out = []
     for h in data.get("hits", []):
         thread = f"https://news.ycombinator.com/item?id={h.get('objectID')}"
@@ -250,14 +273,44 @@ def hackernews(f, q, n, o):
     return [r for r in out if r.title]
 
 
+def parse_bingnews(xml: bytes, days: int | None = None) -> list:
+    import datetime
+    from email.utils import parsedate_to_datetime
+    try:
+        items = list(ET.fromstring(xml).iter("item"))
+    except ET.ParseError:
+        raise RuntimeError("reply was not an RSS feed") from None
+    out = []
+    for it in items:
+        link = (it.findtext("link") or "").strip()
+        real = parse_qs(urlsplit(link).query).get("url", [""])[0] if "apiclick" in link else link
+        try:
+            when = parsedate_to_datetime(it.findtext("pubDate") or "")
+        except (TypeError, ValueError):
+            when = None
+        if days and when is not None and (datetime.datetime.now(when.tzinfo) - when).days > days:
+            continue
+        source = next((c.text or "" for c in it if c.tag.endswith("}Source")), "")
+        out.append(Result(_clean(it.findtext("title")), real, _clean(it.findtext("description"))[:400], "bingnews",
+                          when.strftime("%Y-%m-%d") if when else "", source.strip()))
+    return out
+
+
+def bingnews(f, q, n, o):
+    """Bing's public news RSS feed: recent articles with publication dates and direct links."""
+    r = f.fetch("https://www.bing.com/news/search?" + urlencode({"q": q, "format": "rss"}), max_age=_SEARCH_TTL,
+                timeout=10, retries=1)
+    if not r.ok:
+        raise RuntimeError(r.error)
+    return parse_bingnews(r.body, _DAYS.get(o.get("time")))[:n]
+
+
 def github(f, q, n, o):
     headers = {"Accept": "application/vnd.github+json"}
     if f.cfg.github_token:
         headers["Authorization"] = "Bearer " + f.cfg.github_token
-    data = f.get_json("https://api.github.com/search/repositories?" + urlencode({"q": q, "per_page": min(n, 30)}),
-                      headers=headers, max_age=_SEARCH_TTL)
-    if data is None:
-        raise RuntimeError("request failed")
+    data = _json(f, "https://api.github.com/search/repositories?" + urlencode({"q": q, "per_page": min(n, 30)}),
+                 headers=headers, max_age=_SEARCH_TTL)
     return [Result(r.get("full_name", ""), r.get("html_url", ""), r.get("description") or "", "github",
                    (r.get("pushed_at") or "")[:10],
                    f"{r.get('stargazers_count', 0)} stars | {r.get('language') or 'n/a'}")
@@ -265,11 +318,9 @@ def github(f, q, n, o):
 
 
 def stackexchange(f, q, n, o):
-    data = f.get_json("https://api.stackexchange.com/2.3/search/advanced?" + urlencode(
+    data = _json(f, "https://api.stackexchange.com/2.3/search/advanced?" + urlencode(
         {"order": "desc", "sort": "relevance", "q": q, "site": o.get("se_site") or "stackoverflow",
          "pagesize": min(n, 30)}), max_age=_SEARCH_TTL)
-    if data is None:
-        raise RuntimeError("request failed")
     import html as _html
     return [Result(_html.unescape(i.get("title", "")), i.get("link", ""), "", "stackexchange", "",
                    f"score {i.get('score', 0)}, {i.get('answer_count', 0)} answers"
@@ -277,13 +328,13 @@ def stackexchange(f, q, n, o):
             for i in data.get("items", [])]
 
 
-ENGINES = {"ddg": ddg, "mojeek": mojeek, "wikipedia": wikipedia, "brave": brave, "searxng": searxng,
+ENGINES = {"ddg": ddg, "bingnews": bingnews, "mojeek": mojeek, "wikipedia": wikipedia, "brave": brave, "searxng": searxng,
            "arxiv": arxiv, "openalex": openalex, "crossref": crossref, "hackernews": hackernews,
            "github": github, "stackexchange": stackexchange}
 WEIGHT = {"wikipedia": 0.5, "mojeek": 0.7}
 VERTICALS = {
-    "web": ["ddg", "mojeek", "wikipedia"],
-    "news": ["ddg", "hackernews"],
+    "web": ["ddg", "wikipedia"],            # mojeek is opt-in: it 403s automated clients
+    "news": ["bingnews", "ddg", "hackernews"],
     "papers": ["openalex", "arxiv", "crossref"],
     "code": ["github", "stackexchange", "ddg"],
     "discussions": ["hackernews", "ddg"],
@@ -318,7 +369,7 @@ def search(f: Fetcher, query: str, n: int = 10, *, vertical: str = "web", engine
     scoped = [site] if site else (include if 0 < len(include) <= 4 else [])
     jobs = []
     for name in names:
-        if scoped and name in ("ddg", "mojeek", "brave", "searxng"):
+        if scoped and name in ("ddg", "bingnews", "mojeek", "brave", "searxng"):
             jobs += [(name, f"{query} site:{d}") for d in scoped]
         else:
             jobs.append((name, query))
