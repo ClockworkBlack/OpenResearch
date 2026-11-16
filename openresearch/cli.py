@@ -115,6 +115,12 @@ def main(argv=None) -> int:
     p.add_argument("--token", default=os.environ.get("OPENRESEARCH_TOKEN", ""),
                    help="require this secret (Bearer header, or as /mcp/<token>)")
 
+    p = sub.add_parser("log", help="what recent calls did: engines, pages, timings, errors")
+    p.add_argument("id", nargs="?", default="", help="a call id, for that call's timeline")
+    p.add_argument("-n", type=int, default=20)
+    p.add_argument("--problems", action="store_true", help="only calls (or steps) that went wrong")
+    p.add_argument("--clear", action="store_true", help="empty the log")
+
     sub.add_parser("doctor", help="check which engines and features work from here")
     p = sub.add_parser("cache", help="cache stats / clear")
     p.add_argument("action", choices=["stats", "clear"])
@@ -142,6 +148,13 @@ def main(argv=None) -> int:
 
 def _run(a, f) -> int:
     if True:
+        if a.cmd == "log":
+            if a.clear:
+                f.log.clear()
+                print("log cleared")
+            else:
+                print(call(f, "log", {"id": a.id, "n": a.n, "problems_only": a.problems}))
+            return 0
         if a.cmd == "mcp":
             from . import mcp_server
             if a.http:

@@ -5,7 +5,7 @@ import json
 import os
 from dataclasses import dataclass, field, fields
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 ROBOTS_TOKEN = "OpenResearch"
 
 
@@ -36,6 +36,10 @@ class Config:
     brave_api_key: str = ""
     github_token: str = ""
     openalex_api_key: str = ""
+    tool_timeout: float = 50.0       # seconds a tool call may take before it returns what it has (0 = no limit)
+    engine_timeout: float = 12.0     # seconds to wait for any one search engine
+    log_keep: int = 300              # how many finished calls the log remembers
+    log_stderr: bool = False         # also print one JSON line per call to stderr (for hosted logs)
 
     @classmethod
     def load(cls, path: str | None = None) -> "Config":

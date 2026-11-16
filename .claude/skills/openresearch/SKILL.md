@@ -44,3 +44,9 @@ package is installed (`pip install`), and from the repo folder without installin
 - Cite sources by the URL given in the reply, with the published date when one is shown; say
   "undated" when it is not.
 - Local or private-network sites need `--allow-private` (CLI) or `OPENRESEARCH_ALLOW_PRIVATE=1`.
+
+## When a call is slow, empty or odd
+
+Every result ends with `[call <id>: <seconds>, <n> problem(s)]`. Call the `log` tool with that id (or
+`python3 -m openresearch log <id>`) to see which engine or page failed and why, then retry around it:
+other queries, `search` + `fetch` on specific pages, or `exclude_domains` for a site that blocks reading.

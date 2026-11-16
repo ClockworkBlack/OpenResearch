@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import re
 import xml.etree.ElementTree as ET
-from concurrent.futures import ThreadPoolExecutor
+import time as _time
+from concurrent.futures import ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from urllib.parse import parse_qs, quote, unquote, urlencode, urlsplit, urlunsplit
 
+from . import trace
 from .dom import parse, select, select_one
 from .fetch import Fetcher
 from .page import domain_of
@@ -149,7 +151,8 @@ def ddg(f: Fetcher, q: str, n: int, o: dict) -> list:
         try:
             DDGS = __import__(mod, fromlist=["DDGS"]).DDGS
             # "wt-wt" (no region) is DuckDuckGo's own code; the library's other backends misread it
-            rows = DDGS().text(q, max_results=n, region=o.get("region") or "us-en", timelimit=_TIME.get(o.get("time")))
+            rows = DDGS(timeout=int(trace.clamp(8, 2))).text(q, max_results=n, region=o.get("region") or "us-en",
+                                                             timelimit=_TIME.get(o.get("time")))
             out = [Result(r.get("title", ""), r.get("href", ""), r.get("body", ""), "ddg") for r in rows or []]
             if out and not off_topic(q, out):
                 return out
@@ -161,10 +164,11 @@ def ddg(f: Fetcher, q: str, n: int, o: dict) -> list:
     if _TIME.get(o.get("time")):
         params["df"] = _TIME[o["time"]]
     r = f.fetch("https://html.duckduckgo.com/html/?" + urlencode(params), robots=False, max_age=_SEARCH_TTL,
-                headers={"Referer": "https://html.duckduckgo.com/"})
+                headers={"Referer": "https://html.duckduckgo.com/"}, timeout=8, retries=0)
     out = parse_ddg_html(r.text) if r.ok else []
     if not out:
-        r2 = f.fetch("https://lite.duckduckgo.com/lite/?" + urlencode(params), robots=False, max_age=_SEARCH_TTL)
+        r2 = f.fetch("https://lite.duckduckgo.com/lite/?" + urlencode(params), robots=False, max_age=_SEARCH_TTL,
+                     timeout=8, retries=0)
         out = parse_ddg_lite(r2.text) if r2.ok else []
         if not out and not r.ok and not r2.ok:
             if 202 in (r.status, r2.status):
@@ -371,6 +375,10 @@ VERTICALS = {
 }
 
 
+# Started only when the usual engines are slow or return next to nothing (results weighted lower).
+BACKUP = {"web": ["bingnews", "hackernews"], "code": ["hackernews"], "discussions": ["bingnews"]}
+
+
 def engines_for(f: Fetcher, vertical: str, engines=None) -> list:
     if engines:
         return [e for e in engines if e in ENGINES]
@@ -397,50 +405,89 @@ def search(f: Fetcher, query: str, n: int = 10, *, vertical: str = "web", engine
     names = engines_for(f, vertical, engines)
     opts = {"time": time if time else ("week" if vertical == "news" else ""), "region": region}
     scoped = [site] if site else (include if 0 < len(include) <= 4 else [])
-    jobs = []
-    for name in names:
-        if scoped and name in ("ddg", "bingnews", "mojeek", "brave", "searxng"):
-            jobs += [(name, f"{query} site:{d}") for d in scoped]
-        else:
-            jobs.append((name, query))
     want = min(max(n * 2, 10), 30)
+
+    def plan(engine_names) -> list:
+        jobs = []
+        for name in engine_names:
+            if scoped and name in ("ddg", "bingnews", "mojeek", "brave", "searxng"):
+                jobs += [(name, f"{query} site:{d}") for d in scoped]
+            else:
+                jobs.append((name, query))
+        return jobs
 
     def run(job):
         name, q = job
+        t0, rows, err = _time.monotonic(), [], ""
         try:
-            return name, ENGINES[name](f, q, want, opts), ""
+            rows = ENGINES[name](f, q, want, opts)
         except Exception as e:                       # one engine failing must not sink the search
-            return name, [], f"{type(e).__name__}: {e}"[:160]
+            err = f"{type(e).__name__}: {e}"[:200]
+        trace.event("engine", engine=name, query=q, ms=int((_time.monotonic() - t0) * 1000), results=len(rows),
+                    error=err)
+        return rows, err
 
     counts, errors, merged = {}, {}, {}
     terms = _query_terms(query)
-    with ThreadPoolExecutor(max_workers=max(len(jobs), 1)) as pool:
-        for name, rows, err in pool.map(run, jobs):
-            counts[name] = counts.get(name, 0) + len(rows)
-            if err:
-                errors[name] = err
-            for rank, r in enumerate(rows):
-                if not r.url.startswith("http") or not r.title:
-                    continue
-                r.url = clean_url(r.url)
-                if _in_domains(r.url, exclude) or (site and not _in_domains(r.url, [site])):
-                    continue
-                if include and not _in_domains(r.url, include):
-                    continue
-                key = canonical(r.url)
-                cur = merged.get(key)
-                gain = WEIGHT.get(name, 1.0) / (60 + rank)
-                if cur is None:
-                    r.engines, r.score = [name], gain
-                    merged[key] = r
-                else:
-                    cur.score += gain
-                    if name not in cur.engines:
-                        cur.engines.append(name)
-                    if len(r.snippet) > len(cur.snippet):
-                        cur.snippet = r.snippet
-                    cur.date = cur.date or r.date
-                    cur.extra = cur.extra or r.extra
+
+    def absorb(name, rows, err, weight=1.0):
+        counts[name] = counts.get(name, 0) + len(rows)
+        if err:
+            errors[name] = err
+        for rank, r in enumerate(rows):
+            if not r.url.startswith("http") or not r.title:
+                continue
+            r.url = clean_url(r.url)
+            if _in_domains(r.url, exclude) or (site and not _in_domains(r.url, [site])):
+                continue
+            if include and not _in_domains(r.url, include):
+                continue
+            key = canonical(r.url)
+            cur = merged.get(key)
+            gain = weight * WEIGHT.get(name, 1.0) / (60 + rank)
+            if cur is None:
+                r.engines, r.score = [name], gain
+                merged[key] = r
+            else:
+                cur.score += gain
+                if name not in cur.engines:
+                    cur.engines.append(name)
+                if len(r.snippet) > len(cur.snippet):
+                    cur.snippet = r.snippet
+                cur.date = cur.date or r.date
+                cur.extra = cur.extra or r.extra
+
+    # Engines run side by side and none is waited for beyond the time limit: a slow or hung engine is
+    # reported as timed out instead of holding up the answer. If the usual engines are slow or return
+    # next to nothing, backup engines are started as well.
+    limit = trace.clamp(f.cfg.engine_timeout or 12.0)
+    backups = [] if (engines or f.cfg.engines) else [e for e in BACKUP.get(vertical, []) if e not in names]
+    started = _time.monotonic()
+    pool = ThreadPoolExecutor(max_workers=8)
+    try:
+        pending = {pool.submit(trace.bind(run), job): (job, 1.0) for job in plan(names)}
+
+        def collect(timeout):
+            done, _ = wait(list(pending), timeout=max(timeout, 0))
+            for fut in done:
+                (name, _q), weight = pending.pop(fut)
+                rows, err = fut.result()
+                absorb(name, rows, err, weight)
+
+        collect(min(limit, 4.0) if backups else limit)
+        if backups and len(merged) < 3:
+            for job in plan(backups):
+                pending[pool.submit(trace.bind(run), job)] = (job, 0.6)
+        if pending:
+            collect(limit - (_time.monotonic() - started))
+        for (name, q), _w in pending.values():
+            waited = _time.monotonic() - started
+            counts.setdefault(name, 0)
+            errors.setdefault(name, f"no answer within {waited:.0f}s (gave up waiting)")
+            trace.event("timeout", engine=name, query=q, ms=int(waited * 1000),
+                        error=f"no answer within {waited:.0f}s (gave up waiting)")
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
     for r in merged.values():
         r.score *= 0.4 + 0.6 * coverage(terms, r)    # a result about one word of the query ranks below one about all
         if f.cfg.prefer_domains and _in_domains(r.url, f.cfg.prefer_domains):

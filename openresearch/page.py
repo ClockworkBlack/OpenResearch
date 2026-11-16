@@ -8,14 +8,16 @@ import shutil
 import subprocess
 import time
 import xml.etree.ElementTree as ET
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from urllib.parse import quote, urlsplit
 
 from .extract import extract_html
+from . import trace
 from .fetch import Fetcher, Response
 from .rank import est_tokens, focus, truncate
 
+_OUT_OF_TIME = "skipped: this call's time limit was reached first"
 _BLOCKED = frozenset((401, 403, 404, 406, 410, 429, 451, 500, 502, 503, 504))
 _JS_HINT = re.compile(r'id=["\'](?:root|app|__next|__nuxt)["\']|ng-app|enable javascript|requires javascript|'
                       r'__NEXT_DATA__|data-reactroot', re.I)
@@ -246,12 +248,17 @@ def _render_js(f: Fetcher, url: str):
                     return route.continue_()
 
                 page.route("**/*", gate)
-                page.goto(url, wait_until="domcontentloaded", timeout=int(f.cfg.timeout * 1000))
+                page.goto(url, wait_until="domcontentloaded", timeout=int(trace.clamp(f.cfg.timeout, 2) * 1000))
                 try:
-                    page.wait_for_load_state("networkidle", timeout=6000)
+                    page.wait_for_load_state("networkidle", timeout=int(trace.clamp(6, 1) * 1000))
                 except Exception:
                     pass
-                return page.content()
+                html = page.content()
+                try:                                   # let pending request handlers finish quietly
+                    page.unroute_all(behavior="ignoreErrors")
+                except Exception:
+                    pass
+                return html
             finally:
                 browser.close()
     except Exception:
@@ -260,33 +267,54 @@ def _render_js(f: Fetcher, url: str):
 
 # ------------------------------------------------------------------ public
 
-def read(f: Fetcher, url: str, *, query: str = "", max_tokens: int = 6000, offset: int = 0,
-         mode: str = "main", links: str = "inline", images: bool = False, max_age: int | None = None,
-         render: str | None = None, fallback: bool | None = None, timeout: float | None = None,
-         delay: float | None = None, retries: int | None = None) -> Page:
+def read(f: Fetcher, url: str, **kw) -> Page:
     """Fetch a URL and return it as a Page with token-budgeted Markdown in .content.
 
     query      keep only the passages relevant to this question (big token saver)
     max_tokens budget for .content; offset continues a truncated page
     mode       'main' strips navigation/boilerplate, 'full' keeps the whole page
+    Also: links, images, max_age, render, fallback, timeout, delay, retries, max_wait.
     """
+    t0 = time.monotonic()
+    try:
+        page = _read(f, url, **kw)
+    except Exception as e:                    # a page must never take the whole call down with it
+        page = Page(url=url, error=f"could not process the page ({type(e).__name__}: {e})"[:300])
+    if trace.current() is not None:
+        trace.event("page", url=url, ms=int((time.monotonic() - t0) * 1000), chars=len(page.markdown),
+                    via=page.via, status=page.status, error=page.error)
+    return page
+
+
+def _read(f: Fetcher, url: str, *, query: str = "", max_tokens: int = 6000, offset: int = 0,
+          mode: str = "main", links: str = "inline", images: bool = False, max_age: int | None = None,
+          render: str | None = None, fallback: bool | None = None, timeout: float | None = None,
+          delay: float | None = None, retries: int | None = None, max_wait: float | None = None) -> Page:
     render = render or f.cfg.render
     fallback = f.cfg.wayback_fallback if fallback is None else fallback
-    r = f.fetch(url, max_age=max_age, timeout=timeout, delay=delay, retries=retries)
+    r = f.fetch(url, max_age=max_age, timeout=timeout, delay=delay, retries=retries, max_wait=max_wait)
     page = Page(url=url, final_url=r.final_url or r.url, status=r.status, via=r.via,
                 content_type=r.content_type, fetched_at=r.fetched_at)
     data = None
+    if r.ok and trace.expired():              # no time left to parse it: say so instead of running over
+        page.error = _OUT_OF_TIME
+        return page
     if r.ok:
         data = _convert(r, mode, links, images)
         thin = len(data.get("markdown", "")) < 400
         is_html = "links" in data
-        if is_html and render != "never" and (render == "always" or (thin and _JS_HINT.search(r.text))):
+        if is_html and render != "never" and (render == "always" or (thin and _JS_HINT.search(r.text))) \
+                and trace.remaining(99) > 10:
+            t0 = time.monotonic()
             html = _render_js(f, r.final_url or url)
+            trace.event("render", url=url, ms=int((time.monotonic() - t0) * 1000),
+                        error="" if html else "browser rendering failed or is not installed")
             if html:
                 rendered = extract_html(html, r.final_url or url, mode, links, images)
                 if len(rendered.get("markdown", "")) > len(data.get("markdown", "")):
                     data, page.via = rendered, "rendered"
-    elif fallback and r.status in _BLOCKED and "robots.txt" not in r.error and "private-network" not in r.error:
+    elif (fallback and r.status in _BLOCKED and "robots.txt" not in r.error and "private-network" not in r.error
+          and trace.remaining(99) > 6):
         wr, ts = _wayback(f, url)
         if wr is not None:
             data = _convert(wr, mode, links, images)
@@ -317,10 +345,28 @@ def read(f: Fetcher, url: str, *, query: str = "", max_tokens: int = 6000, offse
     return page
 
 
-def read_many(f: Fetcher, urls: list, workers: int = 8, **kw) -> list:
-    """Read several URLs in parallel; results come back in input order."""
+def read_many(f: Fetcher, urls: list, workers: int = 8, wait_for: float | None = None, **kw) -> list:
+    """Read several URLs in parallel; results come back in input order.
+
+    wait_for  seconds to wait at most. A page still loading then comes back as a failed Page saying so,
+              instead of holding up the rest. Inside a tool call the default is the call's time left."""
     urls = list(dict.fromkeys(urls))
     if not urls:
         return []
-    with ThreadPoolExecutor(max_workers=min(workers, len(urls))) as pool:
-        return list(pool.map(lambda u: read(f, u, **kw), urls))
+    if wait_for is None:
+        left = trace.remaining()
+        wait_for = None if left is None else max(left - 1.0, 0.5)
+    pool = ThreadPoolExecutor(max_workers=min(workers, len(urls)))
+    try:
+        futures = [pool.submit(trace.bind(read), f, u, **kw) for u in urls]
+        done, _ = wait(futures, timeout=wait_for)
+        pages = []
+        for u, fut in zip(urls, futures):
+            if fut in done:
+                pages.append(fut.result())
+            else:
+                trace.event("timeout", url=u, error=_OUT_OF_TIME)
+                pages.append(Page(url=u, error=_OUT_OF_TIME))
+        return pages
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)

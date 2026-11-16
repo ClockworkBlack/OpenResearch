@@ -146,6 +146,10 @@ class Site:
                     if path in nomap:
                         return self._send(200, nomap[path])
                     return self._send(200, "<html><body><p>Leaf page.</p></body></html>")
+                if path == "/slow":
+                    import time
+                    time.sleep(3)
+                    return self._send(200, CATS)
                 if path == "/challenge":
                     return self._send(403, "<html><head><title>Just a moment...</title></head><body></body></html>",
                                       extra={"cf-mitigated": "challenge"})

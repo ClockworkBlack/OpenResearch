@@ -31,7 +31,7 @@ get through to sites that block ordinary clients. OpenResearch identifies itself
 `robots.txt`, and does not attempt to defeat bot protection or CAPTCHAs. LLM-driven "extract
 anything by description" is also not built in; the calling model does that from the Markdown.
 
-## The six tools
+## The tools
 
 | Tool | What it does |
 | --- | --- |
@@ -41,6 +41,9 @@ anything by description" is also not built in; the calling model does that from 
 | `crawl` | Crawls a site within its domain. With `query` it is best-first: the links most related to your question are followed first and each page is trimmed to what matters. Glob `include` / `exclude`, depth and page limits, optional sitemap seeding. |
 | `map` | Lists a site's URLs from sitemaps and the start page without reading them; `search` orders them by relevance. |
 | `extract` | Structured JSON: your CSS selectors (`css::text`, `css::attr(href)`, nested `fields`), tables as rows and records, JSON-LD, metadata, links, and `__NEXT_DATA__`-style embedded state. |
+
+Every result ends with a short note such as `[call 3f2a9c1e: 12.3s, 2 problem(s)]`. A seventh tool,
+`log`, takes that id and shows what the call did. See [Seeing what happened](#seeing-what-happened).
 
 ## Install
 
@@ -174,6 +177,10 @@ Environment variables (or the same keys, lower-case, in `~/.config/openresearch/
 | `OPENRESEARCH_SEARXNG_URL` | | Add your own SearXNG instance as an engine |
 | `BRAVE_API_KEY` | | Add Brave Search as an engine |
 | `OPENRESEARCH_OPENALEX_API_KEY` | | Your own OpenAlex key for paper search (keyless requests share a small daily budget per IP address) |
+| `OPENRESEARCH_TOOL_TIMEOUT` | `50` | Seconds a tool call may take before it returns what it has (`0` = no limit) |
+| `OPENRESEARCH_ENGINE_TIMEOUT` | `12` | Seconds to wait for any one search engine |
+| `OPENRESEARCH_LOG_KEEP` | `300` | How many finished calls the log remembers |
+| `OPENRESEARCH_LOG_STDERR` | `0` | Also print one JSON line per call to stderr |
 | `OPENRESEARCH_CACHE_TTL` | `3600` | Seconds a cached page stays fresh |
 | `OPENRESEARCH_CACHE_DIR` | `~/.cache/openresearch` | Cache location |
 | `OPENRESEARCH_RESPECT_ROBOTS` | `1` | Obey `robots.txt` |
@@ -222,6 +229,36 @@ To keep settings without environment variables, put the same names, lower-case a
 as a network secret for `api.search.brave.com` on the session's environment (header
 `X-Subscription-Token`), and set `BRAVE_API_KEY` to any placeholder so the engine switches on; the
 proxy puts the real key on each request.
+
+## Seeing what happened
+
+Every tool call is recorded: which search engines answered, failed or were given up on, each page
+read or not read and why, how long every step took, and the traceback if something crashed.
+
+- **From Claude:** ask it to "check the OpenResearch log" (the `log` tool). With no arguments it lists
+  recent calls; with a call's id it shows that call's timeline; `problems_only` shows just what went wrong.
+- **In a browser** (hosted server): `https://<your-host>/log/<token>` lists recent calls;
+  add `?id=<call id>` for one call, or `?problems=1` for only the calls that had trouble.
+- **Command line:** `python -m openresearch log`, `python -m openresearch log <id>`, `--problems`, `--clear`.
+- **Hosted logs:** with `OPENRESEARCH_LOG_STDERR=1` (set in the Dockerfile) each call also prints one
+  JSON line, so it shows up in your host's log viewer (Render: the service's **Logs** tab).
+
+```
+Call 3f2a9c1e: research - OK in 12.3s (limit 50s), 2 problem(s), 9120 chars returned
+Timeline (seconds from start; ! = problem):
+  +   0.9s  engine  wikipedia: 10 results | query "reciprocal rank fusion" | 0.9s
+! +  12.0s  timeout engine=ddg error=no answer within 12s (gave up waiting)
+  +  12.6s  page    https://example.org/rrf -> read, 18234 chars | 0.5s
+! +  13.1s  page    https://example.com/x -> FAILED - HTTP 403 (the site blocks automated readers with a browser check)
+```
+
+The log keeps the last 300 calls in `log.db` beside the page cache. On a host with a temporary disk
+(Render's free plan) it starts empty after each restart.
+
+**Time limits.** A tool call returns within `OPENRESEARCH_TOOL_TIMEOUT` seconds (default 50) with whatever
+it has, and says what it skipped. No search engine is waited for longer than
+`OPENRESEARCH_ENGINE_TIMEOUT` (default 12): a slow one is reported as timed out, and if the usual
+engines are slow or nearly empty, backup engines (Bing News, Hacker News) fill in.
 
 ## How it behaves
 

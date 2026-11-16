@@ -10,6 +10,7 @@ import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlsplit
 
+from . import trace
 from .fetch import Fetcher, normalize_url
 from .page import Page, domain_of, read, read_many
 from .rank import tokens
@@ -122,7 +123,7 @@ def map_site(f: Fetcher, url: str, limit: int = 200, search: str = "", subdomain
 
     opened = {url}
     add(read(f, url, max_tokens=50, mode="full", render="never", fallback=False))
-    while explore > 0 and len(opened) <= explore:
+    while explore > 0 and len(opened) <= explore and trace.remaining(99) > 8:
         exact = sum(1 for it in found.values() if score(it) >= 1.0)  # every query word present
         if (from_sitemap >= 50 and (not q or exact)) or (q and exact >= min(limit, 10)):
             break                              # the sitemap covers the site, or enough clear matches
@@ -177,8 +178,11 @@ def crawl(f: Fetcher, url: str, *, max_pages: int = 25, max_depth: int = 3, quer
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         while heap and len(pages) < max_pages:
+            if trace.remaining(99) < 5:               # out of time: return the pages read so far
+                trace.event("timeout", error=f"stopped at the time limit after {len(pages)} pages")
+                break
             batch = [heapq.heappop(heap) for _ in range(min(workers, len(heap), max_pages - len(pages)))]
-            for item, page in pool.map(job, batch):
+            for item, page in pool.map(trace.bind(job), batch):
                 depth = item[4]
                 if page.ok:
                     digest = hashlib.sha1(page.markdown.encode("utf-8", "replace")).hexdigest()

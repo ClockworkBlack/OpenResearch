@@ -8,6 +8,7 @@ from __future__ import annotations
 import re
 from concurrent.futures import ThreadPoolExecutor
 
+from . import trace
 from .fetch import Fetcher
 from .page import read_many
 from .rank import chunk_markdown, dedupe, est_tokens, rank_chunks, tokens
@@ -58,9 +59,9 @@ def research(f: Fetcher, question: str, *, queries=None, depth: str = "standard"
 
     def run_searches(batch: list):
         with ThreadPoolExecutor(max_workers=len(batch)) as pool:
-            runs = list(pool.map(lambda q: search(f, q, d["results"], vertical=vertical, time=time,
-                                                  include_domains=include_domains,
-                                                  exclude_domains=exclude_domains, per_domain=2), batch))
+            runs = list(pool.map(trace.bind(lambda q: search(f, q, d["results"], vertical=vertical, time=time,
+                                                             include_domains=include_domains,
+                                                             exclude_domains=exclude_domains, per_domain=2)), batch))
         for results, rep in runs:
             for k, v in rep.items():
                 old = report.get(k)
@@ -75,7 +76,7 @@ def research(f: Fetcher, question: str, *, queries=None, depth: str = "standard"
 
     if qs:
         run_searches(qs)
-        if len({r.domain for r, _ in fused.values()}) < 3:
+        if len({r.domain for r, _ in fused.values()}) < 3 and trace.remaining(99) > 25:
             # Too little to work with (long or over-specific queries often return next to nothing):
             # try again with plain keywords, and with the question itself.
             have = {q.lower() for q in qs}
@@ -103,15 +104,25 @@ def research(f: Fetcher, question: str, *, queries=None, depth: str = "standard"
         return batch
 
     picks += take(n_pages)
-    reader = dict(workers=8, max_tokens=100000, timeout=15, max_age=max_age, retries=1)
-    pages = read_many(f, picks, **reader)
+    trace.event("phase", name="search done", results=len(ranked), reading=len(picks))
+    # no browser rendering here: it costs ten seconds a page, and the next search result is a better use of them
+    reader = dict(workers=8, max_tokens=100000, timeout=12, max_age=max_age, retries=1, render="never", max_wait=3)
+
+    def reading_time():
+        """Seconds the readers may still take: the call's time left, less a reserve for ranking."""
+        left = trace.remaining()
+        return None if left is None else max(left - 4.0, 1.0)
+
+    pages = read_many(f, picks, wait_for=reading_time(), **reader)
     for _ in range(2):                                # a blocked or dead page gives its slot to the next result
+        if trace.remaining(99) < 12:
+            break
         short = sum(1 for p in pages if not p.ok)
         extra = take(min(short, n_pages)) if short else []
         if not extra:
             break
         n_before = len(pages)
-        pages += read_many(f, extra, **reader)
+        pages += read_many(f, extra, wait_for=reading_time(), **reader)
         if all(not p.ok for p in pages[n_before:]):
             break
         if sum(1 for p in pages if p.ok) >= len(picks):
@@ -121,9 +132,10 @@ def research(f: Fetcher, question: str, *, queries=None, depth: str = "standard"
     good = [p for p in pages if p.ok]
     failed = [p for p in pages if not p.ok]
 
+    trace.event("phase", name="reading done", read=len(good), failed=len(failed))
     chunks = []
-    for i, p in enumerate(good):
-        chunks.extend(chunk_markdown(p.markdown, target=900, doc=i))
+    for i, p in enumerate(good):                      # a very long page is ranked on its first ~150k characters
+        chunks.extend(chunk_markdown(p.markdown[:150_000], target=900, doc=i))
     scoring_query = question + " " + " ".join(q for q in qs if q != question)
     ranked_chunks = dedupe([c for c in rank_chunks(chunks, scoring_query) if c.score > 0][:200])
 
@@ -149,8 +161,15 @@ def research(f: Fetcher, question: str, *, queries=None, depth: str = "standard"
     lines.append(f"Queries: {' | '.join(qs) if qs else '(none)'}\n"
                  f"Search: {len(ranked)} unique results ({eng or 'no search'}). "
                  f"Read {len(good)} pages, {len(failed)} failed.")
+    if trace.expired() or any("time limit" in (p.error or "") for p in failed):
+        lines.append("Stopped at the time limit: some pages were not finished (see Gaps). Ask again for more, "
+                     "or use `fetch` on the pages you need.")
     if not good:
         lines.append("\nNothing could be read. Check the engine errors above; try other queries or pass urls directly.")
+        hits = [r for r in ranked[:8] if r.snippet]
+        if hits:                                      # better than nothing: what the search listings said
+            lines.append("\n## Search snippets only (pages were not read)")
+            lines += [f"- [{r.title}]({r.url}): {r.snippet[:300]}" for r in hits]
     sources = []
     if order:
         lines.append("\n## Sources")
