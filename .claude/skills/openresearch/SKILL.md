@@ -50,3 +50,18 @@ package is installed (`pip install`), and from the repo folder without installin
 Every result ends with `[call <id>: <seconds>, <n> problem(s)]`. Call the `log` tool with that id (or
 `python3 -m openresearch log <id>`) to see which engine or page failed and why, then retry around it:
 other queries, `search` + `fetch` on specific pages, or `exclude_domains` for a site that blocks reading.
+
+## Searching precisely
+
+- Queries are distinctive keywords (names, versions, exact error text), not sentences; one idea each.
+- Give `research` 2-5 different angles: the official source (`site:`), an explainer, recent news
+  (`time`), problems or limitations, numbers. Not rephrasings of one query.
+- Pick the vertical: `news` for events, `papers` for scholarly work (technical terms; arXiv needs every
+  word), `code` for GitHub and Stack Overflow (GitHub qualifiers such as `language:python` work),
+  `discussions` for reception and opinions.
+- Name engines only when one fits exactly: `crossref` for a paper title, `github` for a repository,
+  `stackexchange` for an error, `bingnews` for this week's news.
+- Check dates; cite sources by number; say when one is undated or an archived copy.
+- `guide` (or `python3 -m openresearch guide [topic]`) has the full playbook: queries, engines, recipes,
+  troubleshooting.
+

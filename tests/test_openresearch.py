@@ -447,6 +447,24 @@ class TestSearch(Base):
             S.ENGINES.clear()
             S.ENGINES.update(old)
 
+    def test_guide(self):
+        overview = call(self.f, "guide", {})
+        self.assertIn("Five rules", overview)
+        self.assertIn("vertical `web` asks: ddg, wikipedia", call(self.f, "guide", {"topic": "engines"}))
+        self.f.cfg.tavily_api_key = "tvly-x"                                   # reflects this server's settings
+        engines = call(self.f, "guide", {"topic": "engines"})
+        self.assertIn("vertical `web` asks: tavily, wikipedia; fallbacks when those fail or find little: ddg", engines)
+        self.assertIn("Keyed engines configured on this server: tavily", engines)
+        everything = call(self.f, "guide", {"topic": "all"})
+        for heading in ("# Writing queries", "# Recipes", "# When results disappoint"):
+            self.assertIn(heading, everything)
+        with self.assertRaises(ValueError):
+            call(self.f, "guide", {"topic": "nonsense"})
+        self.assertEqual(self.f.log.recent(5), [])                             # reading the guide is not logged
+        r = mcp_server.Server(self.f).handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                                              "params": {"name": "guide", "arguments": {"topic": "queries"}}})
+        self.assertIn("Keywords, not sentences", r["result"]["content"][0]["text"])
+
     def test_mojeek_is_opt_in(self):
         self.assertNotIn("mojeek", S.engines_for(self.f, "web"))
         self.assertEqual(S.engines_for(self.f, "web", ["mojeek"]), ["mojeek"])
@@ -604,7 +622,7 @@ class TestMcp(Base):
         self.assertEqual(r["result"]["protocolVersion"], "2025-03-26")
         self.assertIsNone(self.srv.handle({"jsonrpc": "2.0", "method": "notifications/initialized"}))
         tools = self.srv.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})["result"]["tools"]
-        self.assertEqual({t["name"] for t in tools}, {"research", "search", "fetch", "crawl", "map", "extract", "log"})
+        self.assertEqual({t["name"] for t in tools}, {"research", "search", "fetch", "crawl", "map", "extract", "log", "guide"})
         for t in tools:
             self.assertEqual(t["inputSchema"]["type"], "object")
             self.assertTrue(t["annotations"]["readOnlyHint"])
@@ -657,7 +675,7 @@ class TestMcp(Base):
         try:
             self.assertEqual(post(url)[0], 404)
             self.assertEqual(post(url + "/wrong")[0], 404)
-            self.assertEqual(len(post(url, {"Authorization": "Bearer s3cret"})[1]["result"]["tools"]), 7)
+            self.assertEqual(len(post(url, {"Authorization": "Bearer s3cret"})[1]["result"]["tools"]), 8)
             self.assertEqual(post(url + "/s3cret")[0], 200)
         finally:
             http.shutdown()

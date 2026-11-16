@@ -115,6 +115,9 @@ def main(argv=None) -> int:
     p.add_argument("--token", default=os.environ.get("OPENRESEARCH_TOKEN", ""),
                    help="require this secret (Bearer header, or as /mcp/<token>)")
 
+    p = sub.add_parser("guide", help="how to write queries, pick engines and research well")
+    p.add_argument("topic", nargs="?", default="overview")
+
     p = sub.add_parser("log", help="what recent calls did: engines, pages, timings, errors")
     p.add_argument("id", nargs="?", default="", help="a call id, for that call's timeline")
     p.add_argument("-n", type=int, default=20)

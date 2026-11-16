@@ -37,7 +37,8 @@ TOOLS = [
             "`queries` (2-5 different angles) for best results." + _UNTRUSTED),
         "inputSchema": {"type": "object", "required": ["question"], "properties": {
             "question": _s("The question to answer, in plain language. Used to rank passages."),
-            "queries": _list("Search queries to run. Omit to derive them from the question."),
+            "queries": _list("2-5 keyword queries, each from a different angle (official source, explainer, recent "
+                             "news, problems, numbers). Omit to derive them from the question."),
             "depth": _s("quick (5 pages, ~3k tokens), standard (9, ~6k) or deep (18, ~12k)",
                         enum=["quick", "standard", "deep"], default="standard"),
             "vertical": _s("web, news, papers (OpenAlex/arXiv/Crossref), code (GitHub/Stack Overflow), discussions",
@@ -55,15 +56,18 @@ TOOLS = [
             "Web search across several engines at once (no API key), with rankings fused and duplicates merged. "
             "Returns titles, URLs, dates and snippets only; follow with `fetch` to read pages."),
         "inputSchema": {"type": "object", "required": ["query"], "properties": {
-            "query": _s("Search query. Short keyword queries work best."),
+            "query": _s("Distinctive keywords (names, versions, exact error text), not a sentence. Supports "
+                        "\"exact phrase\", site:domain and -word. One idea per query."),
             "n": _i("How many results.", 10, minimum=1, maximum=30),
-            "vertical": _s("web, news, papers, code or discussions",
+            "vertical": _s("web (general), news (dated articles, recent events), papers (scholarly: use technical "
+                           "terms), code (GitHub and Stack Overflow), discussions (Hacker News: reception, opinions)",
                            enum=["web", "news", "papers", "code", "discussions"], default="web"),
             "site": _s("Restrict to one domain, e.g. 'docs.python.org'."),
             "include_domains": _list("Only return these domains."),
             "exclude_domains": _list("Drop these domains."),
             "time": _s("Past day, week, month or year.", enum=["day", "week", "month", "year"]),
-            "engines": _list("Override engines: " + ", ".join(ENGINES)),
+            "engines": _list("Use only these engines (usually leave unset): " + ", ".join(ENGINES)
+                             + ". `guide` topic engines says what each is good at."),
         }},
     },
     {
@@ -159,7 +163,19 @@ TOOLS.append({
     }},
 })
 
-_TITLES = {"log": "Show the call log", "research": "Research a question", "search": "Search the web", "fetch": "Read web pages",
+TOOLS.append({
+    "name": "guide",
+    "description": (
+        "How to get the best out of these tools: writing precise queries, which search engine suits which job "
+        "(and which ones this server uses), step-by-step recipes for common research tasks, and what to do when "
+        "results are thin or pages fail. Read `overview` once before a demanding research task."),
+    "inputSchema": {"type": "object", "properties": {
+        "topic": _s("overview, queries, engines, recipes, troubleshooting, or all",
+                    enum=["overview", "queries", "engines", "recipes", "troubleshooting", "all"], default="overview"),
+    }},
+})
+
+_TITLES = {"guide": "How to research well", "log": "Show the call log", "research": "Research a question", "search": "Search the web", "fetch": "Read web pages",
            "crawl": "Crawl a website", "map": "List a site's URLs", "extract": "Extract structured data"}
 for _t in TOOLS:      # every tool only reads the public web: clients may run them without a confirmation step
     _t["title"] = _TITLES[_t["name"]]
@@ -198,6 +214,9 @@ def call_traced(f: Fetcher, name: str, a: dict, tr: "trace.Trace | None" = None)
     """Run a tool under a Trace (time limit + event log). Returns (text, trace); trace is None for `log`."""
     if name == "log":
         return show_log(f, a), None
+    if name == "guide":
+        from .guide import guide
+        return guide(f, a.get("topic", "")), None
     tr = tr or trace.Trace(name, a, f.cfg.tool_timeout)
     done = False
     try:

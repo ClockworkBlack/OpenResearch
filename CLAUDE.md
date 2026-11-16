@@ -9,7 +9,8 @@ Optional ones (`ddgs`, `pypdf`, `playwright`, `brotli`) must be imported lazily 
 - `fetch.py` HTTP, cache, robots, private-network guard; `page.py` URL to `Page` (PDF, feeds, JS render, Wayback)
 - `search.py` engines + rank fusion; `rank.py` chunking and BM25; `research.py` the one-call pipeline
 - `crawl.py` map and crawl; `structured.py` selector/table/JSON-LD extraction
-- `tools.py` the tool schemas (six web tools plus `log`) and dispatcher, shared by `mcp_server.py` and `cli.py`
+- `tools.py` the tool schemas (six web tools plus `log` and `guide`) and dispatcher, shared by `mcp_server.py` and `cli.py`
+- `guide.py` the usage playbook served by the `guide` tool; keep it in step with the engines and tools
 - `logship.py` copies finished log entries to a GitHub repository (optional, off by default)
 - `trace.py` per-call log and time limit: `trace.event(...)` records a step, `trace.note(...)` records a number about the call's work, `trace.remaining()` is the time left
 - `insights.py` per-call summary, statistics across calls and suggestions, also from LogView files

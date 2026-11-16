@@ -42,6 +42,11 @@ anything by description" is also not built in; the calling model does that from 
 | `map` | Lists a site's URLs from sitemaps and the start page without reading them; `search` orders them by relevance. |
 | `extract` | Structured JSON: your CSS selectors (`css::text`, `css::attr(href)`, nested `fields`), tables as rows and records, JSON-LD, metadata, links, and `__NEXT_DATA__`-style embedded state. |
 
+An eighth tool, `guide`, is a playbook for the calling model: how to write precise queries, which
+engine suits which job (listing the engines this server actually uses), recipes for common research
+tasks, and what to do when results disappoint. Claude reads it when it needs it, so it costs nothing
+otherwise.
+
 Every result ends with a short note such as `[call 3f2a9c1e: 12.3s, 2 problem(s)]`. A seventh tool,
 `log`, takes that id and shows what the call did. See [Seeing what happened](#seeing-what-happened).
 
