@@ -115,6 +115,15 @@ def main(argv=None) -> int:
     p.add_argument("--token", default=os.environ.get("OPENRESEARCH_TOKEN", ""),
                    help="require this secret (Bearer header, or as /mcp/<token>)")
 
+    p = sub.add_parser("feeds", help="latest items from RSS/Atom/JSON feeds of sites or feed URLs")
+    p.add_argument("urls", nargs="+")
+    p.add_argument("--query", default="")
+    p.add_argument("--days", type=float)
+    p.add_argument("--limit", type=int, default=30)
+    p.add_argument("--per-feed", type=int, default=0)
+    p.add_argument("--read", type=int, default=0)
+    p.add_argument("--max-tokens", type=int, default=6000)
+
     p = sub.add_parser("guide", help="how to write queries, pick engines and research well")
     p.add_argument("topic", nargs="?", default="overview")
 

@@ -65,6 +65,32 @@ FEED = """<?xml version="1.0"?><rss version="2.0"><channel><title>Example Feed</
 <description>&lt;p&gt;Hello &lt;b&gt;world&lt;/b&gt;&lt;/p&gt;</description></item>
 <item><title>Second post</title><link>http://x.example/2</link></item></channel></rss>"""
 
+ATOM = """<?xml version="1.0" encoding="utf-8"?><feed xmlns="http://www.w3.org/2005/Atom"><title>Widget Blog</title>
+<link href="/blog" rel="alternate"/>
+<entry><title>Widget frequency tuning</title><link href="/blog/tuning" rel="alternate"/><link href="/blog/tuning#c" rel="replies"/>
+<updated>2026-11-14T08:30:00Z</updated><author><name>Ada</name></author><category term="widgets"/>
+<summary type="html">&lt;p&gt;How to set the widget frequency.&lt;/p&gt;</summary></entry>
+<entry><title>Cat pictures</title><link href="/blog/cats"/><published>2026-11-15T10:00:00+02:00</published>
+<content type="html">Cats on windowsills.</content></entry>
+<entry><title>Old widget news</title><link href="/blog/old"/><updated>2020-01-01T00:00:00Z</updated></entry>
+</feed>"""
+
+RDF = """<?xml version="1.0"?><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+ xmlns="http://purl.org/rss/1.0/" xmlns:dc="http://purl.org/dc/elements/1.1/">
+<channel><title>Old School</title><link>http://rdf.example/</link></channel>
+<item><title>RDF widget item</title><link>http://rdf.example/1</link><dc:date>2026-11-13T12:00:00+00:00</dc:date>
+<dc:creator>Bob</dc:creator><description>Widgets, the RSS 1.0 way.</description></item></rdf:RDF>"""
+
+JSON_FEED = """{"version": "https://jsonfeed.org/version/1.1", "title": "JSON Widgets",
+ "home_page_url": "http://json.example/", "items": [
+ {"id": "1", "url": "http://json.example/widget-release", "title": "Widget 2.0 released",
+  "content_html": "<p>Widget <b>2.0</b> is out.</p>", "date_published": "2026-11-16T01:00:00-05:00",
+  "authors": [{"name": "Cy"}], "tags": ["release"]}]}"""
+
+BLOG = """<html><head><title>Widget Blog</title>
+<link rel="alternate" type="application/atom+xml" title="Posts" href="/atom.xml"></head>
+<body><main><h1>Widget Blog</h1><p>Posts about widgets.</p></main></body></html>"""
+
 
 def _pdf(text: str) -> bytes:
     objs = [b"<< /Type /Catalog /Pages 2 0 R >>", b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
@@ -147,8 +173,21 @@ class Site:
                     if self.headers.get("If-None-Match") == '"v1"':
                         return self._send(304, "")
                     return self._send(200, CATS, extra={"ETag": '"v1"'})
-                if path == "/feed.xml":
+                if path in ("/feed.xml", "/nomap/feed"):          # /nomap/ names no feed: found by guessing
                     return self._send(200, FEED, "application/rss+xml")
+                if path == "/atom.xml":
+                    return self._send(200, ATOM, "application/atom+xml")
+                if path == "/rdf.xml":
+                    return self._send(200, RDF, "application/rdf+xml")
+                if path == "/feed.json":
+                    return self._send(200, JSON_FEED, "application/feed+json")
+                if path == "/docs.rss":
+                    return self._send(200, '<?xml version="1.0"?><rss version="2.0"><channel><title>Docs</title>'
+                                      f'<item><title>Configure</title><link>{base}/docs/b</link>'
+                                      '<pubDate>Mon, 16 Nov 2026 01:00:00 GMT</pubDate></item></channel></rss>',
+                                      "application/rss+xml")
+                if path == "/blog":
+                    return self._send(200, BLOG)
                 if path == "/data.json":
                     return self._send(200, '{"name":"widget","sizes":[1,2,3]}', "application/json")
                 if path == "/paper.pdf":

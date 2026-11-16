@@ -145,6 +145,24 @@ TOOLS = [
 
 
 TOOLS.append({
+    "name": "feeds",
+    "description": (
+        "Latest items from RSS, Atom or JSON feeds, newest first. Give sites or feed URLs: a site's feeds are "
+        "found from its pages (or the usual addresses such as /feed). Several sources are merged into one "
+        "list. Filter by `query` and `days`; `read` also fetches the newest articles. Use it to follow blogs, "
+        "release notes, news sites and changelogs." + _UNTRUSTED),
+    "inputSchema": {"type": "object", "required": ["urls"], "properties": {
+        "urls": _list("Sites or feed URLs, e.g. ['simonwillison.net', 'https://github.com/owner/repo/releases.atom']."),
+        "query": _s("Keep only items about this (words in the title, summary or tags)."),
+        "days": _i("Keep only items from the last this many days."),
+        "limit": _i("Most items to return.", 30, minimum=1, maximum=200),
+        "per_feed": _i("Most items from any one feed (0 = no limit), so one busy feed does not crowd out the rest."),
+        "read": _i("Also read the newest this many articles (up to 5), focused on `query`.", 0, minimum=0, maximum=5),
+        "max_tokens": _i("Token budget for the reply.", 6000),
+    }},
+})
+
+TOOLS.append({
     "name": "log",
     "description": (
         "What happened inside recent OpenResearch calls: which search engines answered or failed, which pages "
@@ -175,7 +193,7 @@ TOOLS.append({
     }},
 })
 
-_TITLES = {"guide": "How to research well", "log": "Show the call log", "research": "Research a question", "search": "Search the web", "fetch": "Read web pages",
+_TITLES = {"feeds": "Read RSS and Atom feeds", "guide": "How to research well", "log": "Show the call log", "research": "Research a question", "search": "Search the web", "fetch": "Read web pages",
            "crawl": "Crawl a website", "map": "List a site's URLs", "extract": "Extract structured data"}
 for _t in TOOLS:      # every tool only reads the public web: clients may run them without a confirmation step
     _t["title"] = _TITLES[_t["name"]]
@@ -261,6 +279,14 @@ def _dispatch(f: Fetcher, name: str, a: dict) -> str:
                       exclude=a.get("exclude"), subdomains=bool(a.get("subdomains")),
                       use_sitemap=bool(a.get("use_sitemap")))
         return format_crawl(pages, int(a.get("max_tokens", 12000)))
+    if name == "feeds":
+        from .feeds import read_feeds
+        urls = a.get("urls") or ([a["url"]] if a.get("url") else [])
+        if isinstance(urls, str):
+            urls = [urls]
+        return read_feeds(f, urls, query=a.get("query", ""), days=float(a.get("days") or 0),
+                          limit=int(a.get("limit") or 30), read=int(a.get("read") or 0),
+                          per_feed=int(a.get("per_feed") or 0), max_tokens=int(a.get("max_tokens") or 6000))
     if name == "map":
         items = map_site(f, a["url"], int(a.get("limit", 100)), a.get("search", ""), bool(a.get("subdomains")),
                          explore=min(int(a.get("explore", 12)), 50))

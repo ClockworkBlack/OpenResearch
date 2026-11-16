@@ -17,6 +17,7 @@ Pick the tool by the job:
 - A page somewhere on a known site: `map` with `search`, then `fetch`.
 - A whole section of a site (docs, a blog): `crawl` with `query` and `include` globs.
 - Tables, product lists, metadata as JSON: `extract`.
+- What a blog, news site, project or changelog published lately: `feeds` with the sites or feed URLs.
 - A call was slow, empty or odd: `log` with the call id printed at the end of the result.
 
 Five rules that matter most:
@@ -130,6 +131,14 @@ accepted answer or the repository README with `query`.
 
 **Opinions and reception**
 vertical `discussions` (Hacker News) plus `research` with `X review`, `X problems`.
+
+**Follow sources over time**
+`feeds` with the sites (their feeds are found for you) or feed URLs, `days` for the window and `query` to
+keep one topic; `per_feed` stops one busy feed crowding out the rest; `read: 3` reads the newest articles.
+Useful feed URLs: GitHub releases `https://github.com/<owner>/<repo>/releases.atom`, commits
+`.../commits/<branch>.atom`; a subreddit `https://www.reddit.com/r/<name>/.rss`; YouTube channel
+`https://www.youtube.com/feeds/videos.xml?channel_id=<id>`; arXiv category `https://rss.arxiv.org/rss/cs.IR`.
+Some of these sites limit automated readers; the result says so when a feed cannot be read.
 
 **Data in tables**
 `extract` with `want: ["tables"]`, or `selectors` for repeated items; it returns JSON without guessing.

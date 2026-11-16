@@ -622,7 +622,7 @@ class TestMcp(Base):
         self.assertEqual(r["result"]["protocolVersion"], "2025-03-26")
         self.assertIsNone(self.srv.handle({"jsonrpc": "2.0", "method": "notifications/initialized"}))
         tools = self.srv.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})["result"]["tools"]
-        self.assertEqual({t["name"] for t in tools}, {"research", "search", "fetch", "crawl", "map", "extract", "log", "guide"})
+        self.assertEqual({t["name"] for t in tools}, {"research", "search", "fetch", "crawl", "map", "extract", "feeds", "log", "guide"})
         for t in tools:
             self.assertEqual(t["inputSchema"]["type"], "object")
             self.assertTrue(t["annotations"]["readOnlyHint"])
@@ -675,7 +675,7 @@ class TestMcp(Base):
         try:
             self.assertEqual(post(url)[0], 404)
             self.assertEqual(post(url + "/wrong")[0], 404)
-            self.assertEqual(len(post(url, {"Authorization": "Bearer s3cret"})[1]["result"]["tools"]), 8)
+            self.assertEqual(len(post(url, {"Authorization": "Bearer s3cret"})[1]["result"]["tools"]), 9)
             self.assertEqual(post(url + "/s3cret")[0], 200)
         finally:
             http.shutdown()
@@ -734,6 +734,80 @@ class TestMcp(Base):
         with socket.create_connection(("127.0.0.1", post.port), timeout=10) as raw:
             raw.sendall("POST /mcp/caf\u00e9 HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\n\r\n{}".encode())
             self.assertIn(b" 404 ", raw.recv(200))
+
+
+class TestFeeds(Base):
+    def test_every_format_parses_to_one_shape(self):
+        from openresearch.feeds import parse_feed
+        from fixture_site import ATOM, FEED, JSON_FEED, RDF
+        atom = parse_feed(ATOM, "http://blog.example/atom.xml")
+        self.assertEqual((atom["kind"], atom["title"]), ("Atom", "Widget Blog"))
+        first = atom["items"][0]
+        self.assertEqual((first["title"], first["link"], first["author"], first["tags"]),
+                         ("Widget frequency tuning", "http://blog.example/blog/tuning", "Ada", ["widgets"]))
+        self.assertEqual(first["summary"], "How to set the widget frequency.")
+        self.assertEqual(first["date"].isoformat(), "2026-11-14T08:30:00+00:00")
+        self.assertEqual(atom["items"][1]["date"].isoformat(), "2026-11-15T08:00:00+00:00")   # +02:00 to UTC
+        rss = parse_feed(FEED)
+        self.assertEqual((rss["kind"], rss["items"][0]["summary"], rss["items"][1]["date"]), ("RSS", "Hello world", None))
+        self.assertEqual(rss["items"][0]["date"].isoformat(), "2026-03-02T00:00:00+00:00")     # a date with no time
+        rdf = parse_feed(RDF)
+        self.assertEqual((rdf["kind"], rdf["items"][0]["author"], rdf["items"][0]["date"].day), ("RSS 1.0", "Bob", 13))
+        js = parse_feed(JSON_FEED)
+        self.assertEqual((js["kind"], js["items"][0]["summary"], js["items"][0]["date"].hour),
+                         ("JSON Feed", "Widget 2.0 is out.", 6))
+        from openresearch.feeds import is_feed
+        self.assertTrue(is_feed(b'<rss version="2.0"><channel></channel></rss>', "text/xml"))   # no declaration
+        self.assertTrue(is_feed(b'<?xml version="1.0"?>\n<?xml-stylesheet href="s.xsl"?>\n<feed xmlns="x">', ""))
+        self.assertFalse(is_feed(b"<html><body>An article about <feed> formats</body></html>", "text/html"))
+        for bad in ("<html><body>no</body></html>", '{"a": 1}', "not xml at all <"):
+            with self.assertRaises(ValueError):
+                parse_feed(bad)
+
+    def test_discovery(self):
+        from openresearch.feeds import discover
+        self.assertEqual(discover(self.f, self.base + "/blog")[0], [self.base + "/atom.xml"])     # <link rel=alternate>
+        self.assertEqual(discover(self.f, self.base + "/rdf.xml")[0], [self.base + "/rdf.xml"])  # already a feed
+        urls, note = discover(self.f, self.base + "/")                                         # names none: guessed
+        self.assertEqual(urls, [self.base + "/feed.xml"])
+        self.assertIn("found at /feed.xml", note)
+        self.assertEqual(discover(self.f, self.base + "/missing")[0], [])
+
+    def test_feeds_tool_merges_filters_and_reads(self):
+        text = call(self.f, "feeds", {"urls": [self.base + "/blog", self.base + "/rdf.xml", self.base + "/feed.json"]})
+        order = [text.index(t) for t in ("Widget 2.0 released", "Cat pictures", "Widget frequency tuning",
+                                         "RDF widget item", "Old widget news")]
+        self.assertEqual(order, sorted(order))                                   # newest first across feeds
+        self.assertIn("5 item(s) from 3 feed(s)", text)
+        self.assertIn("2026-11-14 08:30 UTC | Widget Blog | Ada", text)
+        about = call(self.f, "feeds", {"urls": [self.base + "/blog"], "query": "widget frequency"})
+        self.assertIn("Widget frequency tuning", about)
+        self.assertNotIn("Cat pictures", about)
+        recent = call(self.f, "feeds", {"urls": [self.base + "/blog"], "days": 365})
+        self.assertNotIn("Old widget news", recent)                              # 2020: older than a year
+        self.assertIn("Cat pictures", recent)
+        one = call(self.f, "feeds", {"urls": [self.base + "/blog", self.base + "/rdf.xml"], "per_feed": 1})
+        self.assertIn("2 item(s)", one)
+        broken = call(self.f, "feeds", {"urls": [self.base + "/missing", self.base + "/rdf.xml"]})
+        self.assertIn("Problems:", broken)
+        self.assertIn("/missing: could not open", broken)
+        self.assertIn("RDF widget item", broken)
+        with self.assertRaises(ValueError):
+            call(self.f, "feeds", {"urls": []})
+        last_ok = next(e for e in self.f.log.recent(5) if e["status"] == "ok")      # the call with /missing
+        self.assertEqual((last_ok["metrics"]["feeds"], last_ok["metrics"]["feeds_failed"]), (1, 1))
+
+    def test_reading_articles_from_a_feed(self):
+        text = call(self.f, "feeds", {"urls": [self.base + "/docs.rss"], "query": "configure", "read": 1})
+        self.assertIn("1. [Configure]", text)
+        self.assertIn("## Articles", text)
+        self.assertIn("42 hertz", text)                                          # the article itself was read
+
+    def test_fetch_renders_feeds(self):
+        self.assertIn("- [Widget 2.0 released](http://json.example/widget-release) - Mon, 16 Nov 2026",
+                      read(self.f, self.base + "/feed.json").markdown)
+        atom = read(self.f, self.base + "/atom.xml").markdown
+        self.assertIn(f"- [Widget frequency tuning]({self.base}/blog/tuning) - Sat, 14 Nov 2026", atom)
 
 
 class TestLog(Base):
