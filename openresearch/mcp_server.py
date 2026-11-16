@@ -126,14 +126,32 @@ def serve_http(host: str = "127.0.0.1", port: int = 8765, token: str = "", serve
             return hmac.compare_digest(bearer, token) or hmac.compare_digest(path, "/mcp/" + token)
 
         def do_GET(self):
+            self._body()
             if self.path.split("?")[0] == "/health":
                 return self._send(200, json.dumps({"ok": True, "version": VERSION}).encode())
             self._send(405, b'{"error":"use POST"}')
 
         def do_DELETE(self):
+            self._body()
             self._send(200 if self._authorized() else 404)
 
+        def _body(self):
+            """Read the whole request body before replying, whatever the reply. A body left unread on a
+            kept-alive connection is parsed as the next request, so proxies that reuse connections
+            (Render, Cloudflare) would fail the next, valid request. Returns None if it is too large."""
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                length = 0
+            if length > 4_000_000:
+                self.close_connection = True             # too big to drain: drop the connection instead
+                return None
+            return self.rfile.read(length) if length > 0 else b""
+
         def do_POST(self):
+            raw = self._body()
+            if raw is None:
+                return self._send(413, b'{"error":"too large"}')
             path = self.path.split("?")[0].rstrip("/")
             if not (path == "/mcp" or path.startswith("/mcp/")):
                 return self._send(404, b'{"error":"not found: the connector URL must end in /mcp/<your OPENRESEARCH_TOKEN>"}')
@@ -141,10 +159,7 @@ def serve_http(host: str = "127.0.0.1", port: int = 8765, token: str = "", serve
                 # 404, not 401: a 401 makes MCP clients start an OAuth sign-in this server does not offer.
                 return self._send(404, b'{"error":"not found: the connector URL must end in /mcp/<your OPENRESEARCH_TOKEN>"}')
             try:
-                length = int(self.headers.get("Content-Length") or 0)
-                if length > 4_000_000:
-                    return self._send(413, b'{"error":"too large"}')
-                msg = json.loads(self.rfile.read(length) or b"null")
+                msg = json.loads(raw or b"null")
             except ValueError:
                 return self._send(400, json.dumps(
                     {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "Parse error"}}).encode())

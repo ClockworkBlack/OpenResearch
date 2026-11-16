@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import unittest
 from unittest import mock
 import urllib.request
@@ -549,6 +550,25 @@ class TestMcp(Base):
         finally:
             http.shutdown()
             http.server_close()
+
+
+    def test_http_rejected_request_does_not_poison_keepalive(self):
+        import http.client
+        srv = mcp_server.serve_http("127.0.0.1", 0, "goodtoken", self.srv)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            c = http.client.HTTPConnection("127.0.0.1", srv.server_address[1], timeout=10)
+            body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "ping"})
+            statuses = []
+            for path in ("/mcp/wrong", "/mcp/goodtoken", "/mcp", "/mcp/goodtoken"):
+                c.request("POST", path, body, {"Content-Type": "application/json"})
+                r = c.getresponse()
+                r.read()
+                statuses.append(r.status)
+            self.assertEqual(statuses, [404, 200, 404, 200])      # same connection throughout
+        finally:
+            srv.shutdown()
+            srv.server_close()
 
 
 class TestCli(Base):
