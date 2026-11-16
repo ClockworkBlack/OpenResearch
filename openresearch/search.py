@@ -242,6 +242,7 @@ def tavily(f, q, n, o):
         body["time_range"] = o["time"]
     data = _json(f, _TAVILY_URL, data=_json_mod.dumps(body).encode("utf-8"), max_age=_SEARCH_TTL,
                  headers={"Authorization": "Bearer " + f.cfg.tavily_api_key.strip(), "Content-Type": "application/json"})
+    trace.note(tavily_credits=1)
     return [Result(_clean(r.get("title")), r.get("url", ""), _clean(r.get("content"))[:500], "tavily",
                    norm_date(r.get("published_date") or ""))
             for r in data.get("results", []) if isinstance(r, dict)]
@@ -543,6 +544,13 @@ def search(f: Fetcher, query: str, n: int = 10, *, vertical: str = "web", engine
         out.append(r)
         if len(out) >= n:
             break
+    t = trace.current()
+    if t is not None and t.tool == "search":         # credit the engines whose results were shown
+        shown = {}
+        for r in out:
+            for name in r.engines:
+                shown[name] = shown.get(name, 0) + 1
+        trace.note(source_engines=shown, results_shown=len(out))
     return out, report
 
 

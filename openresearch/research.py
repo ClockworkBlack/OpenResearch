@@ -86,6 +86,9 @@ def research(f: Fetcher, question: str, *, queries=None, depth: str = "standard"
                 run_searches(wider)
                 qs += wider
     ranked = [r for r, _ in sorted(fused.values(), key=lambda x: -x[1])]
+    trace.note(depth=depth, queries=len(qs), widened=len(qs) > len([q for q in (queries if queries is not None
+                                                                                  else _auto_queries(question)) if q.strip()][:8]),
+               candidates=len(ranked), token_budget=budget)
     given = list(dict.fromkeys(u for u in (urls or []) if u and u.strip()))
     per, picks, seen = {}, list(given), {canonical(u) for u in given}
     queue = [r for r in ranked if canonical(r.url) not in seen]
@@ -105,6 +108,7 @@ def research(f: Fetcher, question: str, *, queries=None, depth: str = "standard"
 
     picks += take(n_pages)
     trace.event("phase", name="search done", results=len(ranked), reading=len(picks))
+    trace.note(picked=len(picks), given_urls=len(given))
     # no browser rendering here: it costs ten seconds a page, and the next search result is a better use of them
     reader = dict(workers=8, max_tokens=100000, timeout=12, max_age=max_age, retries=1, render="never", max_wait=3)
 
@@ -122,6 +126,7 @@ def research(f: Fetcher, question: str, *, queries=None, depth: str = "standard"
         if not extra:
             break
         n_before = len(pages)
+        trace.note(backfilled=len(extra))
         pages += read_many(f, extra, wait_for=reading_time(), **reader)
         if all(not p.ok for p in pages[n_before:]):
             break
@@ -214,6 +219,14 @@ def research(f: Fetcher, question: str, *, queries=None, depth: str = "standard"
             f"- [{r.title}]({r.url})" + (f" - {r.snippet[:140]}" if r.snippet else "") for r in unread[:8]))
     if notes:
         lines.append("\n## Gaps and leads\n" + "\n".join(notes))
+    found_by = {}                                     # which engines found the pages that became sources
+    for doc in order:
+        hit = snippets.get(canonical(good[doc].url))
+        for name in (hit.engines if hit is not None else []) or ["given url"]:
+            found_by[name] = found_by.get(name, 0) + 1
+    trace.note(sources=len(order), passages=len(taken), read_not_used=len(silent), unread=len(unread),
+               missing_terms=missing[:10], source_engines=found_by,
+               source_domains=[good[d].domain for d in order][:12])
     return {"text": "\n".join(lines), "sources": sources, "report": report,
             "unread": [{"title": r.title, "url": r.url} for r in unread],
             "failed": [{"url": p.url, "error": p.error} for p in failed]}

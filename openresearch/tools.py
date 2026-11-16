@@ -146,12 +146,16 @@ TOOLS.append({
         "What happened inside recent OpenResearch calls: which search engines answered or failed, which pages "
         "were read or could not be and why, and how long each step took. Use it when a call was slow, came "
         "back empty, or gave odd results. With no arguments it lists recent calls; with `id` (shown at the "
-        "end of every result) it shows that call's full timeline."),
+        "end of every result) it shows that call's summary, suggestions and full timeline; with `stats` it "
+        "measures many calls together and says what to improve."),
     "inputSchema": {"type": "object", "properties": {
         "id": _s("A call id, to see that call's timeline."),
         "n": _i("How many recent calls to list.", 10, minimum=1, maximum=100),
         "problems_only": {"type": "boolean", "default": False,
                           "description": "List only calls that failed or had problems; in a timeline, only the problems."},
+        "stats": {"type": "boolean", "default": False,
+                  "description": "Statistics over the last `n` calls (default 100): speed per tool, how often each "
+                                 "search engine answers and supplies sources, why pages fail, and what to change."},
     }},
 })
 
@@ -165,6 +169,15 @@ for _t in TOOLS:      # every tool only reads the public web: clients may run th
 
 def show_log(f: Fetcher, a: dict) -> str:
     only = bool(a.get("problems_only"))
+    if a.get("stats"):
+        from . import insights
+        entries = f.log.recent(int(a.get("n") or 100))
+        stats = insights.aggregate(entries)
+        note = "" if len(entries) < f.log.keep else f" (the server keeps {f.log.keep}; older ones are on GitHub)"
+        text = insights.format_stats(stats, insights.suggest(stats), f" on this server{note}")
+        if f.log.shipper is not None:
+            text += "\n\nFor statistics over everything kept on GitHub: python -m openresearch log --stats --dir <folder>"
+        return text
     if a.get("id"):
         entry = f.log.get(str(a["id"]))
         if entry is None:

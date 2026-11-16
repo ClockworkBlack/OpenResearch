@@ -253,6 +253,8 @@ read or not read and why, how long every step took, and the traceback if somethi
 - **In a browser** (hosted server): `https://<your-host>/log/<token>` lists recent calls;
   add `?id=<call id>` for one call, or `?problems=1` for only the calls that had trouble.
 - **Command line:** `python -m openresearch log`, `python -m openresearch log <id>`, `--problems`, `--clear`.
+- **Statistics:** `log` with `stats` (or `/log/<token>?stats=1`, or `python -m openresearch log --stats`)
+  measures many calls together and lists what to change. See below.
 - **Hosted logs:** with `OPENRESEARCH_LOG_STDERR=1` (set in the Dockerfile) each call also prints one
   JSON line, so it shows up in your host's log viewer (Render: the service's **Logs** tab).
 
@@ -282,6 +284,25 @@ Whatever is still waiting is sent when the server shuts down.
 
 `log` then ends with a line such as `Copy on GitHub - yourname/LogView/openresearch: 12 call(s) saved`,
 or the reason an upload failed. A failed upload never affects a tool call; it is retried with the next one.
+
+**What each entry measures.** Besides the timeline, every call carries a summary and suggestions:
+
+- time split into searching, reading and ranking, and the share of the time limit used;
+- per search engine: queries, results, seconds per query, failures and time-outs, and how many of the
+  pages it found ended up as research sources (the real measure of an engine's worth);
+- pages read and failed, with each failure sorted by cause (bot check, forbidden, not found, rate
+  limited, time limit, no readable text...) and the site it came from;
+- for `research`: queries run and whether they had to be widened, results found, pages picked and
+  backfilled, sources and passages used, tokens returned against the budget, question words with no evidence;
+- network: requests, cache hits, kilobytes downloaded, time spent on robots.txt, the slowest requests;
+- the server version and deployed commit, whether the call woke the server (cold start), Tavily credits used.
+
+**Statistics over many calls** add these up per tool (calls, time-outs, average and 90th-percentile
+time) and per engine (how often it answers, how fast, how many sources it supplies), list the sites
+that fail most and why, and turn it into suggestions, for example "ddg answered only 40% of 25 queries"
+or "stackoverflow.com failed 6 times (bot check): add it to OPENRESEARCH_EXCLUDE_DOMAINS". The server only
+remembers its last 300 calls (fewer after a restart); for everything kept on GitHub, clone the log
+repository and run `python -m openresearch log --stats --dir LogView/openresearch`.
 
 **Time limits.** A tool call returns within `OPENRESEARCH_TOOL_TIMEOUT` seconds (default 50) with whatever
 it has, and says what it skipped. No search engine is waited for longer than
