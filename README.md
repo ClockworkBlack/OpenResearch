@@ -77,6 +77,28 @@ claude mcp add openresearch -- python3 -m openresearch mcp
 (run from the repo folder, or after `pip install .`). A skill at
 `.claude/skills/openresearch/SKILL.md` tells Claude when to use which tool.
 
+### On your phone, in any Claude session
+
+Claude's apps (and Claude Code sessions started from them) reach MCP servers through **connectors**,
+which live on your claude.ai account, so one connector works in every chat and every session.
+A connector needs the server on the public internet, so host it once:
+
+1. Tap **[Deploy to Render](https://render.com/deploy?repo=https://github.com/ClockworkBlack/OpenResearch)**,
+   sign in, and approve the blueprint (`render.yaml`). Render builds the Dockerfile and generates a
+   secret `OPENRESEARCH_TOKEN`.
+2. When it's live, open the service: copy its address (`https://openresearch-xxxx.onrender.com`) and,
+   under **Environment**, the value of `OPENRESEARCH_TOKEN`.
+3. Open <https://claude.ai/customize/connectors>, choose **Add custom connector**, name it OpenResearch,
+   and paste `https://openresearch-xxxx.onrender.com/mcp/<token>` as the URL. Treat it like a password.
+4. Start a new chat or session and turn the connector on. Check it with `…/health` in a browser.
+
+The free plan sleeps after 15 idle minutes, so the first request after a pause can take a minute
+while it wakes; the paid "starter" plan stays awake. Pushes to `main` redeploy automatically.
+
+Without hosting anything, Claude Code cloud sessions on this repository get the server from
+`.mcp.json`, and the `openresearch` skill falls back to `python3 -m openresearch` on the command
+line wherever the package is installed.
+
 ### Claude app (web, desktop, mobile) as a custom connector
 
 Custom connectors are reached from Anthropic's cloud, so the server has to be on the public

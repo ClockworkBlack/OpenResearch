@@ -6,7 +6,8 @@ description: Search the web, read pages as Markdown, crawl sites, extract tables
 # OpenResearch
 
 Use the `openresearch` MCP tools when they are connected. Otherwise run the same tools from the
-shell in this repo: `python3 -m openresearch <tool> ...` (add `--help` for flags).
+shell: `python3 -m openresearch <tool> ...` (add `--help` for flags). That works anywhere once the
+package is installed (`pip install`), and from the repo folder without installing.
 
 ## Which tool
 
